@@ -12012,3 +12012,199 @@ def render_operations_delivery_workspace(user, data, focus_proposal_id=None):
             "Accepted project exists, but the client has not submitted the detailed requirement yet. "
             "Delivery plan and weekly targets will appear after client requirement submission."
         )
+
+# =============================================================================
+# FINAL PATCH: FLEXIBLE HR BANDWIDTH / ROLE CAPACITY MATCHING
+# Paste at the VERY BOTTOM of decisiondesk_chunks/05_design_system.py
+# =============================================================================
+
+def _capacity_role_aliases(role):
+    """Return flexible aliases for requirement role matching."""
+    role_text = safe_text(role).lower()
+
+    alias_map = {
+        "ai/ml engineer": ["ai/ml engineer", "ai ml engineer", "machine learning", "ml engineer", "ai engineer", "data scientist", "ai/ml engineer trainee"],
+        "backend developer": ["backend developer", "backend engineer", "python developer", "api developer", "server developer"],
+        "frontend developer": ["frontend developer", "frontend engineer", "react developer", "ui developer", "web developer"],
+        "full stack developer": ["full stack developer", "fullstack developer", "full stack engineer", "software engineer"],
+        "devops engineer": ["devops engineer", "cloud engineer", "deployment engineer", "site reliability", "sre"],
+        "qa engineer": ["qa engineer", "qa tester", "test engineer", "quality analyst", "quality assurance"],
+        "data engineer": ["data engineer", "etl developer", "pipeline engineer", "data pipeline", "analytics engineer"],
+        "project manager": ["project manager", "technical architect", "delivery manager", "scrum master"],
+    }
+
+    aliases = [role_text]
+
+    for key, values in alias_map.items():
+        if role_text == key or key in role_text or role_text in key:
+            aliases.extend(values)
+
+    clean = []
+    for item in aliases:
+        item = safe_text(item).lower().strip()
+        if item and item not in clean:
+            clean.append(item)
+
+    return clean
+
+
+def _capacity_employee_matches_role(employee_row, required_role):
+    """Flexible employee-role match using designation, department, skills, and role text."""
+    if employee_row is None:
+        return False
+
+    if hasattr(employee_row, "to_dict"):
+        employee_row = employee_row.to_dict()
+
+    aliases = _capacity_role_aliases(required_role)
+
+    fields = []
+    for col in [
+        "designation",
+        "employee_designation",
+        "department",
+        "primary_skill",
+        "skill",
+        "skills",
+        "domain",
+        "project_role",
+    ]:
+        fields.append(safe_text(employee_row.get(col)))
+
+    combined = " | ".join(fields).lower()
+
+    if not combined.strip():
+        return False
+
+    for alias in aliases:
+        if alias and alias in combined:
+            return True
+
+    required_words = [
+        word for word in re.split(r"[^a-z0-9]+", safe_text(required_role).lower())
+        if len(word) >= 3
+    ]
+
+    if required_words:
+        hits = sum(1 for word in required_words if word in combined)
+        return hits >= max(1, min(2, len(required_words)))
+
+    return False
+
+
+def build_dynamic_role_capacity(required_roles, employees, new_project_timeline_months=0):
+    """Flexible live/projected capacity by role.
+
+    Fix:
+    - No active Supabase allocations means workload load is 0.
+    - Employees are matched flexibly by designation/skill/department.
+    - If matching employees exist, HR should not show hiring gap only because exact designation text differs.
+    """
+    dynamic_employees = build_dynamic_employee_capacity(employees, new_project_timeline_months)
+    rows = []
+
+    if dynamic_employees is None or getattr(dynamic_employees, "empty", True):
+        dynamic_employees = pd.DataFrame()
+
+    for _, req_row in required_roles.iterrows():
+        role = safe_text(req_row.get("required_role"))
+        needed = safe_number(req_row.get("required_people"), 0)
+
+        if dynamic_employees.empty:
+            matching = pd.DataFrame()
+        else:
+            match_mask = dynamic_employees.apply(
+                lambda emp_row: _capacity_employee_matches_role(emp_row, role),
+                axis=1,
+            )
+            matching = dynamic_employees[match_mask].copy()
+
+        if matching.empty:
+            avg_salary = 90000
+            available_now_fte = 0.0
+            projected_available_fte = 0.0
+            active_allocated_fte = 0.0
+            avg_progress = 0.0
+            blockers = 0
+            nearest_release = ""
+            capacity_notes = "No matching employee found for this role after flexible designation/skill matching."
+        else:
+            avg_salary = safe_number(
+                pd.to_numeric(matching.get("monthly_ctc"), errors="coerce").dropna().mean(),
+                90000,
+            )
+
+            available_now_fte = (
+                pd.to_numeric(matching.get("availability_percent", 0), errors="coerce")
+                .fillna(0)
+                .clip(lower=0)
+                .sum()
+                / 100
+            )
+
+            projected_available_fte = (
+                pd.to_numeric(matching.get("projected_available_percent", matching.get("availability_percent", 0)), errors="coerce")
+                .fillna(0)
+                .clip(lower=0)
+                .sum()
+                / 100
+            )
+
+            active_allocated_fte = (
+                pd.to_numeric(matching.get("live_allocated_percent", 0), errors="coerce")
+                .fillna(0)
+                .clip(lower=0)
+                .sum()
+                / 100
+            )
+
+            progress_values = pd.to_numeric(
+                matching.get("avg_project_progress_percent", 0),
+                errors="coerce",
+            ).fillna(0)
+            progress_values = progress_values[progress_values > 0]
+            avg_progress = float(progress_values.mean()) if len(progress_values) else 0.0
+
+            blockers = int(
+                pd.to_numeric(matching.get("hurdle_count", 0), errors="coerce")
+                .fillna(0)
+                .sum()
+            )
+
+            release_dates = [
+                safe_text(v)
+                for v in matching.get("next_release_date", [])
+                if safe_text(v)
+            ]
+            nearest_release = min(release_dates) if release_dates else ""
+
+            matched_names = []
+            for _, emp_row in matching.head(4).iterrows():
+                matched_names.append(
+                    safe_text(emp_row.get("employee_name"))
+                    or safe_text(emp_row.get("employee_id"))
+                )
+
+            capacity_notes = (
+                f"Matched {len(matching)} employee(s): "
+                + ", ".join([name for name in matched_names if name])
+                + "."
+            )
+
+        rows.append({
+            "role": role,
+            "needed": round(needed, 2),
+            "available_capacity": round(projected_available_fte, 2),
+            "available_now_fte": round(available_now_fte, 2),
+            "projected_available_fte": round(projected_available_fte, 2),
+            "active_allocated_fte": round(active_allocated_fte, 2),
+            "gap": round(max(0, needed - projected_available_fte), 2),
+            "immediate_gap": round(max(0, needed - available_now_fte), 2),
+            "avg_current_project_progress_percent": round(avg_progress, 2),
+            "hurdle_or_support_request_count": blockers,
+            "nearest_release_date": nearest_release,
+            "capacity_notes": capacity_notes,
+            "avg_monthly_salary": round(avg_salary, 2),
+        })
+
+    return rows
