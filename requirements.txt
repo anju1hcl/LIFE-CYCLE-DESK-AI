@@ -4,3 +4,9 @@ openpyxl
 python-dotenv
 openai
 httpx
+duckdb
+sqlalchemy
+supabase
+requests
+plotly
+psycopg2-binary
