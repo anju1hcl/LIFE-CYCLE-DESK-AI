@@ -13001,3 +13001,273 @@ def render_agentic_decision_pack(report):
         st.caption(
             "Internal only. Client cannot see hiring, salary, margin, cost, employee allocation, or executive notes."
         )
+
+# =============================================================================
+# FINAL SMALL PATCH: OLD-STYLE EMPLOYEE ALLOCATION UI WITH DOMAIN + PER-PERSON BANDWIDTH
+# Paste at the VERY BOTTOM of decisiondesk_chunks/05_design_system.py
+# =============================================================================
+
+def _allocfmt_text(row, *keys):
+    if hasattr(row, "to_dict"):
+        row = row.to_dict()
+
+    for key in keys:
+        value = safe_text(row.get(key)).strip()
+        if value:
+            return value
+
+    return ""
+
+
+def _allocfmt_original_domain(emp):
+    return (
+        _allocfmt_text(emp, "primary_skill", "domain", "skill", "skills")
+        or _allocfmt_text(emp, "department")
+        or _allocfmt_text(emp, "designation")
+        or "Project delivery"
+    )
+
+
+def _allocfmt_original_role(emp):
+    return (
+        _allocfmt_text(emp, "designation", "employee_designation")
+        or _allocfmt_original_domain(emp)
+        or "Delivery Engineer"
+    )
+
+
+def _allocfmt_percent_value(value, default=100):
+    text_value = safe_text(value).replace("%", "").strip()
+
+    try:
+        return max(0, min(100, int(float(text_value))))
+    except Exception:
+        return default
+
+
+def _allocfmt_available_percent(emp):
+    value = (
+        _allocfmt_text(emp, "available_bandwidth")
+        or _allocfmt_text(emp, "availability_percent")
+        or _allocfmt_text(emp, "base_availability_percent")
+        or "100"
+    )
+
+    return _allocfmt_percent_value(value, default=100)
+
+
+def _allocfmt_default_allocation(emp):
+    available = _allocfmt_available_percent(emp)
+
+    if available <= 0:
+        return 5
+
+    return max(5, min(40, available))
+
+
+def _final_clean_available_employees(data, project_id):
+    """Employee dropdown with original domain/designation and clean bandwidth display."""
+    employees = data.get("employees", pd.DataFrame()).copy() if isinstance(data, dict) else pd.DataFrame()
+
+    if employees is None or employees.empty:
+        return pd.DataFrame()
+
+    try:
+        employees = filter_project_delivery_employees(employees, data)
+    except Exception:
+        pass
+
+    if employees is None or employees.empty:
+        return pd.DataFrame()
+
+    active_ids = _team_active_employee_ids(project_id)
+
+    if "employee_id" in employees.columns:
+        employees = employees[
+            ~employees["employee_id"].astype(str).str.upper().isin(active_ids)
+        ].copy()
+
+    if employees.empty:
+        return employees
+
+    employees["label"] = employees.apply(
+        lambda r: (
+            f"{r.get('employee_id')} - {r.get('employee_name')} | "
+            f"{_allocfmt_original_role(r)} | "
+            f"{_allocfmt_original_domain(r)} | "
+            f"available {_allocfmt_available_percent(r)}%"
+        ),
+        axis=1,
+    )
+
+    return employees
+
+
+def _final_clean_build_selected_employee_rows(selected_labels, employees, project, default_module="", default_role="", allocation_percent=40):
+    """Build allocation rows using each employee's original domain/designation.
+
+    This prevents generic rows like:
+    Delivery Engineer / Project delivery.
+    """
+    rows = []
+
+    for label in selected_labels or []:
+        matched = employees[employees["label"] == label]
+
+        if matched.empty:
+            continue
+
+        emp = matched.iloc[0].to_dict()
+
+        generic_modules = ["", "project delivery", "project delivery support"]
+        generic_roles = ["", "delivery engineer"]
+
+        default_module_text = safe_text(default_module).strip()
+        default_role_text = safe_text(default_role).strip()
+
+        module = (
+            _allocfmt_original_domain(emp)
+            if default_module_text.lower() in generic_modules
+            else default_module_text
+        )
+
+        role = (
+            _allocfmt_original_role(emp)
+            if default_role_text.lower() in generic_roles
+            else default_role_text
+        )
+
+        allocation = _allocfmt_default_allocation(emp)
+
+        rows.append({
+            "employee_id": safe_text(emp.get("employee_id")),
+            "employee_name": safe_text(emp.get("employee_name")),
+            "department": safe_text(emp.get("department")),
+            "designation": safe_text(emp.get("designation")),
+            "project_role": role,
+            "assigned_module": module,
+            "responsibility_summary": (
+                f"Assigned to support {module} for "
+                f"{project_display_name(project=project, project_id=project.get('project_id'))}. "
+                "Submit mandatory weekly progress updates and raise blockers/support needs from the employee workbench."
+            ),
+            "allocation_percent": str(allocation),
+        })
+
+    return rows
+
+
+def _final_clean_render_initial_allocation(project, plan, user, data=None):
+    """Old-style initial allocation: per employee domain, role, and bandwidth."""
+    project_id = safe_text(project.get("project_id"))
+
+    active_allocations = get_project_allocations(project_id)
+
+    if active_allocations is not None and not active_allocations.empty:
+        return
+
+    with st.expander("Initial delivery team allocation", expanded=False):
+        st.caption("Select employees. Each selected employee keeps their original domain/designation and gets an individual allocation percentage.")
+
+        employees = _final_clean_available_employees(data or {}, project_id)
+
+        if employees is None or employees.empty:
+            st.warning("No eligible delivery employees are available for allocation.")
+            return
+
+        with st.form(f"final_clean_initial_alloc_oldstyle_form_{project_id}", clear_on_submit=True):
+            selected = st.multiselect(
+                "Select delivery employees",
+                employees["label"].tolist(),
+            )
+
+            selected_rows = []
+
+            for label in selected or []:
+                emp = employees[employees["label"] == label].iloc[0].to_dict()
+
+                emp_id = safe_text(emp.get("employee_id"))
+                emp_name = safe_text(emp.get("employee_name"))
+                domain = _allocfmt_original_domain(emp)
+                role_default = _allocfmt_original_role(emp)
+                available = _allocfmt_available_percent(emp)
+                suggested_alloc = _allocfmt_default_allocation(emp)
+
+                st.markdown(
+                    f"**{emp_id} - {emp_name}**  \n"
+                    f"Domain: `{domain}` · Role: `{role_default}` · Available bandwidth: `{available}%`"
+                )
+
+                c1, c2, c3 = st.columns([1, 1, 1])
+
+                with c1:
+                    module = st.text_input(
+                        "Module / work area",
+                        value=domain,
+                        key=f"oldstyle_initial_module_{project_id}_{emp_id}",
+                    )
+
+                with c2:
+                    role = st.text_input(
+                        "Project role",
+                        value=role_default,
+                        key=f"oldstyle_initial_role_{project_id}_{emp_id}",
+                    )
+
+                with c3:
+                    allocation_percent = st.number_input(
+                        "Allocation %",
+                        min_value=5,
+                        max_value=100,
+                        value=suggested_alloc,
+                        step=5,
+                        key=f"oldstyle_initial_alloc_{project_id}_{emp_id}",
+                    )
+
+                selected_rows.append({
+                    "employee_id": emp_id,
+                    "employee_name": emp_name,
+                    "department": safe_text(emp.get("department")),
+                    "designation": safe_text(emp.get("designation")),
+                    "project_role": role,
+                    "assigned_module": module,
+                    "responsibility_summary": (
+                        f"Assigned to support {module} for "
+                        f"{project_display_name(project=project, project_id=project_id)}. "
+                        "Submit mandatory weekly progress updates and raise blockers/support needs from the employee workbench."
+                    ),
+                    "allocation_percent": str(allocation_percent),
+                })
+
+            manager_plan = st.text_area(
+                "Technical Architect delivery plan",
+                value=safe_text(plan.get("operations_manager_plan") or plan.get("operations_agent_plan")),
+                height=180,
+            )
+
+            clicked = st.form_submit_button(
+                "Approve delivery plan and allocate selected employees",
+                type="primary",
+            )
+
+        if clicked:
+            if not selected_rows:
+                st.error("Select at least one eligible delivery employee.")
+                return
+
+            if not safe_text(manager_plan).strip():
+                st.error("Please keep or edit the delivery plan before approving.")
+                return
+
+            ok, msg = _final_clean_previous_approve_delivery_plan_and_allocate(
+                project,
+                plan,
+                user,
+                manager_plan,
+                selected_rows,
+            )
+
+            if ok:
+                _final_clean_toast("Initial team allocation saved with original domain and individual bandwidth.")
+            else:
+                st.error(msg)
