@@ -13272,106 +13272,312 @@ def _final_clean_render_initial_allocation(project, plan, user, data=None):
             else:
                 st.error(msg)
 
+# # =============================================================================
+# # FINAL PATCH: TECHNICAL ARCHITECT <-> CLIENT MESSAGE BOX + CLIENT NOTIFICATION
+# # Paste at the VERY BOTTOM of decisiondesk_chunks/05_design_system.py
+# # =============================================================================
+
+# def _ta_client_message_sender_is_client(row):
+#     if hasattr(row, "to_dict"):
+#         row = row.to_dict()
+#     return safe_text(row.get("sender_type")).strip().lower() in ["client", "external client"]
+
+
+# def _ta_client_message_sender_is_ta(row):
+#     if hasattr(row, "to_dict"):
+#         row = row.to_dict()
+#     sender_type = safe_text(row.get("sender_type")).strip().lower()
+#     return sender_type in [
+#         "technical architect",
+#         "technical architect ai agent",
+#         "operations",
+#         "operations executive",
+#     ]
+
+
+# def _ta_client_messages(project_id="", proposal_id="", client_id=""):
+#     try:
+#         messages = read_simple_table("client_operations_messages", CLIENT_OPERATIONS_MESSAGE_COLUMNS)
+#     except Exception:
+#         return pd.DataFrame(columns=CLIENT_OPERATIONS_MESSAGE_COLUMNS)
+
+#     if messages is None or messages.empty:
+#         return pd.DataFrame(columns=CLIENT_OPERATIONS_MESSAGE_COLUMNS)
+
+#     working = messages.copy()
+
+#     if project_id and "project_id" in working.columns:
+#         working = working[working["project_id"].astype(str) == safe_text(project_id)]
+
+#     if proposal_id and "proposal_id" in working.columns:
+#         working = working[working["proposal_id"].astype(str) == safe_text(proposal_id)]
+
+#     if client_id and "client_id" in working.columns:
+#         working = working[working["client_id"].astype(str) == safe_text(client_id)]
+
+#     if not working.empty and "created_at" in working.columns:
+#         working = working.sort_values("created_at", ascending=False)
+
+#     return working
+
+
+# def _ta_client_unread_messages_for_client(project_id="", proposal_id="", client_id=""):
+#     messages = _ta_client_messages(project_id=project_id, proposal_id=proposal_id, client_id=client_id)
+
+#     if messages is None or messages.empty:
+#         return pd.DataFrame(columns=CLIENT_OPERATIONS_MESSAGE_COLUMNS)
+
+#     rows = []
+#     for _, row in messages.iterrows():
+#         row_dict = row.to_dict()
+#         if not _ta_client_message_sender_is_ta(row_dict):
+#             continue
+#         if safe_text(row_dict.get("seen_by_client")).strip().lower() == "yes":
+#             continue
+#         rows.append(row_dict)
+
+#     return pd.DataFrame(rows, columns=messages.columns) if rows else pd.DataFrame(columns=messages.columns)
+
+
+# def _ta_client_mark_messages_seen_by_client(project_id="", proposal_id="", client_id=""):
+#     messages = _ta_client_unread_messages_for_client(
+#         project_id=project_id,
+#         proposal_id=proposal_id,
+#         client_id=client_id,
+#     )
+
+#     if messages is None or messages.empty:
+#         return 0
+
+#     count = 0
+
+#     for _, row in messages.iterrows():
+#         row_dict = row.to_dict()
+#         row_to_save = {column: safe_text(row_dict.get(column, "")) for column in CLIENT_OPERATIONS_MESSAGE_COLUMNS}
+#         row_to_save["seen_by_client"] = "Yes"
+
+#         try:
+#             upsert_simple_row(
+#                 "client_operations_messages",
+#                 "message_id",
+#                 CLIENT_OPERATIONS_MESSAGE_COLUMNS,
+#                 row_to_save,
+#             )
+#             count += 1
+#         except Exception:
+#             pass
+
+#     return count
+
+
+# def save_operations_reply_to_client(project, report, user, message_text):
+#     """Technical Architect reply visible to client with unread client notification."""
+#     message_text = safe_text(message_text).strip()
+
+#     if not message_text:
+#         return False, "Please type a reply before sending."
+
+#     project_id = safe_text(project.get("project_id"))
+#     proposal_id = safe_text(project.get("proposal_id") or report.get("proposal_id"))
+#     client_id = safe_text(project.get("client_id") or report.get("client_id"))
+#     now = current_timestamp()
+
+#     row = {column: "" for column in CLIENT_OPERATIONS_MESSAGE_COLUMNS}
+#     row.update({
+#         "message_id": make_client_ops_message_id(),
+#         "project_id": project_id,
+#         "proposal_id": proposal_id,
+#         "client_id": client_id,
+#         "sender_type": "Technical Architect",
+#         "sender_id": actor_id(user),
+#         "sender_name": actor_name(user) or "Technical Architect",
+#         "message_text": message_text,
+#         "created_at": now,
+#         "seen_by_client": "No",
+#         "seen_by_operations": "Yes",
+#     })
+
+#     upsert_simple_row(
+#         "client_operations_messages",
+#         "message_id",
+#         CLIENT_OPERATIONS_MESSAGE_COLUMNS,
+#         row,
+#     )
+
+#     try:
+#         append_proposal_history(
+#             proposal_id,
+#             user,
+#             "Technical Architect Reply to Client",
+#             comment=message_text,
+#             summary="Technical Architect replied to the client. Client portal notification is now unread.",
+#         )
+#     except Exception:
+#         pass
+
+#     return True, "Reply sent to client. Client portal notification is now active."
+
+
+# def render_client_technical_architect_message_center(project, report, client_account):
+#     """Client-side message center with visible unread Technical Architect notification."""
+#     project_id = safe_text(project.get("project_id"))
+#     proposal_id = safe_text(project.get("proposal_id") or report.get("proposal_id"))
+#     client_id = safe_text(project.get("client_id") or client_account.get("client_id") or report.get("client_id"))
+
+#     unread = _ta_client_unread_messages_for_client(
+#         project_id=project_id,
+#         proposal_id=proposal_id,
+#         client_id=client_id,
+#     )
+
+#     st.markdown("### Technical Architect messages")
+
+#     if unread is not None and not unread.empty:
+#         latest = unread.iloc[0].to_dict()
+
+#         st.warning(
+#             f"New message from Technical Architect: {safe_text(latest.get('message_text'))}"
+#         )
+
+#         st.caption(f"Sent at: {safe_text(latest.get('created_at'))}")
+
+#         if st.button(
+#             "Mark Technical Architect message as read",
+#             key=f"client_mark_ta_msg_read_{project_id}_{safe_text(latest.get('message_id'))}",
+#             type="primary",
+#         ):
+#             marked = _ta_client_mark_messages_seen_by_client(
+#                 project_id=project_id,
+#                 proposal_id=proposal_id,
+#                 client_id=client_id,
+#             )
+#             st.success(f"{marked} Technical Architect message(s) marked as read.")
+#             st.rerun()
+#     else:
+#         st.info("No unread Technical Architect message right now.")
+
+#     with st.expander("Client / Technical Architect conversation", expanded=True):
+#         render_client_operations_conversation(
+#             project,
+#             report,
+#             client_account,
+#             viewer="client",
+#         )
+
+#         with st.form(f"client_to_ta_message_form_{project_id}", clear_on_submit=True):
+#             msg = st.text_area(
+#                 "Message Technical Architect",
+#                 height=110,
+#                 placeholder="Example: Please confirm rollout priority, access details, integration sequence, or clarification needed.",
+#             )
+#             clicked = st.form_submit_button("Send message to Technical Architect", type="primary")
+
+#         if clicked:
+#             ok, message = save_client_message_to_operations(
+#                 project,
+#                 report,
+#                 client_account,
+#                 msg,
+#             )
+
+#             if ok:
+#                 st.success("Message sent to Technical Architect.")
+#             else:
+#                 st.error(message)
+
+
+# def render_technical_architect_client_reply_box(project, report, user):
+#     """Technical Architect reply box shown inside the delivery workspace."""
+#     project_id = safe_text(project.get("project_id"))
+
+#     st.markdown("### Client / Technical Architect conversation")
+#     st.caption("Use this to reply to the client. The client will see an unread message notification in the client portal.")
+
+#     render_client_operations_conversation(
+#         project,
+#         report or {},
+#         {
+#             "client_id": safe_text(project.get("client_id") or report.get("client_id")),
+#             "client_name": safe_text(report.get("client_name"), "Client"),
+#         },
+#         viewer="operations",
+#         user=user,
+#     )
+
+#     with st.form(f"ta_reply_to_client_form_{project_id}", clear_on_submit=True):
+#         reply_text = st.text_area(
+#             "Reply to client",
+#             height=110,
+#             placeholder="Example: Thanks for the clarification. We will proceed with the branch-wise access plan and confirm the next delivery step.",
+#         )
+#         clicked = st.form_submit_button("Send reply to client", type="primary")
+
+#     if clicked:
+#         ok, msg = save_operations_reply_to_client(
+#             project,
+#             report or {},
+#             user,
+#             reply_text,
+#         )
+
+#         if ok:
+#             st.success("Reply sent to client. Client notification is active.")
+#         else:
+#             st.error(msg)
+
+
+# try:
+#     _ta_msg_previous_render_client_delivery_section = render_client_delivery_section
+# except Exception:
+#     _ta_msg_previous_render_client_delivery_section = None
+
+
+# def render_client_delivery_section(report, client_account):
+#     """Client delivery page + always-visible Technical Architect message center."""
+#     if _ta_msg_previous_render_client_delivery_section is not None:
+#         _ta_msg_previous_render_client_delivery_section(report, client_account)
+
+#     if safe_text(report.get("client_response")) != "Accept Proposal":
+#         return
+
+#     try:
+#         project = get_project_for_proposal(report.get("proposal_id")) or ensure_project_for_accepted_proposal(report, client_account)
+#         if not project:
+#             return
+
+#         render_client_technical_architect_message_center(
+#             project,
+#             report,
+#             client_account,
+#         )
+#     except Exception as exc:
+#         st.caption(f"Technical Architect message center is not available right now: {exc}")
+
 # =============================================================================
-# FINAL PATCH: TECHNICAL ARCHITECT <-> CLIENT MESSAGE BOX + CLIENT NOTIFICATION
+# FINAL RESTORE: OLD TECHNICAL ARCHITECT <-> CLIENT MESSAGE DELIVERY
 # Paste at the VERY BOTTOM of decisiondesk_chunks/05_design_system.py
 # =============================================================================
 
-def _ta_client_message_sender_is_client(row):
-    if hasattr(row, "to_dict"):
-        row = row.to_dict()
-    return safe_text(row.get("sender_type")).strip().lower() in ["client", "external client"]
+def _oldmsg_display_sender_type(sender_type):
+    sender_type = safe_text(sender_type).strip()
 
+    if sender_type.lower() in ["operations", "operations executive", "technical architect"]:
+        return "Technical Architect"
 
-def _ta_client_message_sender_is_ta(row):
-    if hasattr(row, "to_dict"):
-        row = row.to_dict()
-    sender_type = safe_text(row.get("sender_type")).strip().lower()
-    return sender_type in [
-        "technical architect",
-        "technical architect ai agent",
-        "operations",
-        "operations executive",
-    ]
+    if sender_type.lower() in ["client", "external client"]:
+        return "Client"
 
-
-def _ta_client_messages(project_id="", proposal_id="", client_id=""):
-    try:
-        messages = read_simple_table("client_operations_messages", CLIENT_OPERATIONS_MESSAGE_COLUMNS)
-    except Exception:
-        return pd.DataFrame(columns=CLIENT_OPERATIONS_MESSAGE_COLUMNS)
-
-    if messages is None or messages.empty:
-        return pd.DataFrame(columns=CLIENT_OPERATIONS_MESSAGE_COLUMNS)
-
-    working = messages.copy()
-
-    if project_id and "project_id" in working.columns:
-        working = working[working["project_id"].astype(str) == safe_text(project_id)]
-
-    if proposal_id and "proposal_id" in working.columns:
-        working = working[working["proposal_id"].astype(str) == safe_text(proposal_id)]
-
-    if client_id and "client_id" in working.columns:
-        working = working[working["client_id"].astype(str) == safe_text(client_id)]
-
-    if not working.empty and "created_at" in working.columns:
-        working = working.sort_values("created_at", ascending=False)
-
-    return working
-
-
-def _ta_client_unread_messages_for_client(project_id="", proposal_id="", client_id=""):
-    messages = _ta_client_messages(project_id=project_id, proposal_id=proposal_id, client_id=client_id)
-
-    if messages is None or messages.empty:
-        return pd.DataFrame(columns=CLIENT_OPERATIONS_MESSAGE_COLUMNS)
-
-    rows = []
-    for _, row in messages.iterrows():
-        row_dict = row.to_dict()
-        if not _ta_client_message_sender_is_ta(row_dict):
-            continue
-        if safe_text(row_dict.get("seen_by_client")).strip().lower() == "yes":
-            continue
-        rows.append(row_dict)
-
-    return pd.DataFrame(rows, columns=messages.columns) if rows else pd.DataFrame(columns=messages.columns)
-
-
-def _ta_client_mark_messages_seen_by_client(project_id="", proposal_id="", client_id=""):
-    messages = _ta_client_unread_messages_for_client(
-        project_id=project_id,
-        proposal_id=proposal_id,
-        client_id=client_id,
-    )
-
-    if messages is None or messages.empty:
-        return 0
-
-    count = 0
-
-    for _, row in messages.iterrows():
-        row_dict = row.to_dict()
-        row_to_save = {column: safe_text(row_dict.get(column, "")) for column in CLIENT_OPERATIONS_MESSAGE_COLUMNS}
-        row_to_save["seen_by_client"] = "Yes"
-
-        try:
-            upsert_simple_row(
-                "client_operations_messages",
-                "message_id",
-                CLIENT_OPERATIONS_MESSAGE_COLUMNS,
-                row_to_save,
-            )
-            count += 1
-        except Exception:
-            pass
-
-    return count
+    return sender_type or "Message"
 
 
 def save_operations_reply_to_client(project, report, user, message_text):
-    """Technical Architect reply visible to client with unread client notification."""
+    """Old-style Technical Architect reply.
+
+    Important:
+    Store sender_type as 'Operations' internally because older message logic
+    uses this value to make the reply visible/unread for the client.
+    UI still displays it as Technical Architect.
+    """
     message_text = safe_text(message_text).strip()
 
     if not message_text:
@@ -13388,7 +13594,7 @@ def save_operations_reply_to_client(project, report, user, message_text):
         "project_id": project_id,
         "proposal_id": proposal_id,
         "client_id": client_id,
-        "sender_type": "Technical Architect",
+        "sender_type": "Operations",
         "sender_id": actor_id(user),
         "sender_name": actor_name(user) or "Technical Architect",
         "message_text": message_text,
@@ -13410,145 +13616,126 @@ def save_operations_reply_to_client(project, report, user, message_text):
             user,
             "Technical Architect Reply to Client",
             comment=message_text,
-            summary="Technical Architect replied to the client. Client portal notification is now unread.",
+            summary="Technical Architect replied to the client from the delivery dashboard. Reply is visible in the client portal.",
         )
     except Exception:
         pass
 
-    return True, "Reply sent to client. Client portal notification is now active."
+    try:
+        clear_workflow_read_cache()
+    except Exception:
+        pass
+
+    return True, "Reply sent to the client portal."
 
 
-def render_client_technical_architect_message_center(project, report, client_account):
-    """Client-side message center with visible unread Technical Architect notification."""
+def render_client_operations_conversation(project, report, client_account, viewer="client", user=None):
+    """Old-style compact recent-first conversation + Technical Architect reply box."""
     project_id = safe_text(project.get("project_id"))
     proposal_id = safe_text(project.get("proposal_id") or report.get("proposal_id"))
-    client_id = safe_text(project.get("client_id") or client_account.get("client_id") or report.get("client_id"))
+    client_id = safe_text(
+        project.get("client_id")
+        or (client_account.get("client_id") if isinstance(client_account, dict) else "")
+        or report.get("client_id")
+    )
 
-    unread = _ta_client_unread_messages_for_client(
+    messages = get_client_operations_messages(
         project_id=project_id,
         proposal_id=proposal_id,
         client_id=client_id,
     )
 
-    st.markdown("### Technical Architect messages")
+    st.markdown("#### Previous / recent messages")
 
-    if unread is not None and not unread.empty:
-        latest = unread.iloc[0].to_dict()
+    if messages is None or messages.empty:
+        st.caption("No messages yet.")
+    else:
+        labels = []
+        rows = []
 
-        st.warning(
-            f"New message from Technical Architect: {safe_text(latest.get('message_text'))}"
+        for idx, (_, row) in enumerate(messages.iterrows(), start=1):
+            sender_type = _oldmsg_display_sender_type(row.get("sender_type"))
+            sender = safe_text(row.get("sender_name")) or sender_type
+            created = safe_text(row.get("created_at")) or "Time not captured"
+            preview = safe_text(row.get("message_text"))[:70]
+
+            labels.append(f"{idx}. {created} | {sender} | {preview}")
+            rows.append(row.to_dict())
+
+        selected = st.selectbox(
+            "Previous / recent messages",
+            labels,
+            key=f"oldmsg_client_ta_convo_{safe_text(viewer)}_{project_id}",
         )
 
-        st.caption(f"Sent at: {safe_text(latest.get('created_at'))}")
+        row = rows[labels.index(selected)]
+        sender_type = _oldmsg_display_sender_type(row.get("sender_type"))
+        sender = safe_text(row.get("sender_name")) or sender_type
+        created = safe_text(row.get("created_at"))
+
+        st.markdown(
+            f"""
+            <div class="dd-soft-panel">
+                <strong>{sender}</strong>
+                <span class="dd-muted-small">({sender_type}) · {created}</span><br>
+                <span>{safe_text(row.get('message_text'))}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if safe_text(viewer).lower() != "operations":
+        return
+
+    st.markdown("#### Reply to client")
+    st.caption("This reply will be saved in the client portal conversation and shown to the client.")
+
+    reply_sent_key = f"oldmsg_ta_reply_sent_{project_id}"
+    reply_counter_key = f"oldmsg_ta_reply_counter_{project_id}"
+
+    if reply_counter_key not in st.session_state:
+        st.session_state[reply_counter_key] = 0
+
+    if st.session_state.get(reply_sent_key, False):
+        st.success("Reply sent to the client portal.")
 
         if st.button(
-            "Mark Technical Architect message as read",
-            key=f"client_mark_ta_msg_read_{project_id}_{safe_text(latest.get('message_id'))}",
-            type="primary",
+            "Send another reply",
+            key=f"oldmsg_send_another_reply_{project_id}",
         ):
-            marked = _ta_client_mark_messages_seen_by_client(
-                project_id=project_id,
-                proposal_id=proposal_id,
-                client_id=client_id,
-            )
-            st.success(f"{marked} Technical Architect message(s) marked as read.")
+            st.session_state[reply_sent_key] = False
+            st.session_state[reply_counter_key] = int(st.session_state.get(reply_counter_key, 0)) + 1
             st.rerun()
-    else:
-        st.info("No unread Technical Architect message right now.")
 
-    with st.expander("Client / Technical Architect conversation", expanded=True):
-        render_client_operations_conversation(
-            project,
-            report,
-            client_account,
-            viewer="client",
-        )
+        return
 
-        with st.form(f"client_to_ta_message_form_{project_id}", clear_on_submit=True):
-            msg = st.text_area(
-                "Message Technical Architect",
-                height=110,
-                placeholder="Example: Please confirm rollout priority, access details, integration sequence, or clarification needed.",
-            )
-            clicked = st.form_submit_button("Send message to Technical Architect", type="primary")
-
-        if clicked:
-            ok, message = save_client_message_to_operations(
-                project,
-                report,
-                client_account,
-                msg,
-            )
-
-            if ok:
-                st.success("Message sent to Technical Architect.")
-            else:
-                st.error(message)
-
-
-def render_technical_architect_client_reply_box(project, report, user):
-    """Technical Architect reply box shown inside the delivery workspace."""
-    project_id = safe_text(project.get("project_id"))
-
-    st.markdown("### Client / Technical Architect conversation")
-    st.caption("Use this to reply to the client. The client will see an unread message notification in the client portal.")
-
-    render_client_operations_conversation(
-        project,
-        report or {},
-        {
-            "client_id": safe_text(project.get("client_id") or report.get("client_id")),
-            "client_name": safe_text(report.get("client_name"), "Client"),
-        },
-        viewer="operations",
-        user=user,
-    )
-
-    with st.form(f"ta_reply_to_client_form_{project_id}", clear_on_submit=True):
+    with st.form(
+        f"oldmsg_ta_reply_form_{project_id}_{st.session_state.get(reply_counter_key, 0)}",
+        clear_on_submit=True,
+    ):
         reply_text = st.text_area(
-            "Reply to client",
+            "Type reply for client",
             height=110,
-            placeholder="Example: Thanks for the clarification. We will proceed with the branch-wise access plan and confirm the next delivery step.",
+            placeholder="Example: Thanks for the clarification. We will proceed with the rollout priority and confirm the next delivery step.",
         )
-        clicked = st.form_submit_button("Send reply to client", type="primary")
 
-    if clicked:
+        reply_clicked = st.form_submit_button(
+            "Send reply to client",
+            type="primary",
+        )
+
+    if reply_clicked:
         ok, msg = save_operations_reply_to_client(
             project,
             report or {},
-            user,
+            user or {},
             reply_text,
         )
 
         if ok:
-            st.success("Reply sent to client. Client notification is active.")
+            st.session_state[reply_sent_key] = True
+            st.session_state[reply_counter_key] = int(st.session_state.get(reply_counter_key, 0)) + 1
+            st.success(msg)
+            st.rerun()
         else:
             st.error(msg)
-
-
-try:
-    _ta_msg_previous_render_client_delivery_section = render_client_delivery_section
-except Exception:
-    _ta_msg_previous_render_client_delivery_section = None
-
-
-def render_client_delivery_section(report, client_account):
-    """Client delivery page + always-visible Technical Architect message center."""
-    if _ta_msg_previous_render_client_delivery_section is not None:
-        _ta_msg_previous_render_client_delivery_section(report, client_account)
-
-    if safe_text(report.get("client_response")) != "Accept Proposal":
-        return
-
-    try:
-        project = get_project_for_proposal(report.get("proposal_id")) or ensure_project_for_accepted_proposal(report, client_account)
-        if not project:
-            return
-
-        render_client_technical_architect_message_center(
-            project,
-            report,
-            client_account,
-        )
-    except Exception as exc:
-        st.caption(f"Technical Architect message center is not available right now: {exc}")
