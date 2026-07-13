@@ -11155,3 +11155,860 @@ def _ld_show_success(project_id, action):
     """Disabled: do not show old saved success messages."""
     clear_postkick_temporary_success_messages()
     return None
+
+
+# =============================================================================
+# FINAL OVERRIDE: CLEAN POST-KICKOFF UI + REMOVE STALE SUCCESS POPUPS
+# Paste this at the VERY BOTTOM of decisiondesk_chunks/05_design_system.py
+# =============================================================================
+
+POSTKICK_STALE_SUCCESS_PHRASES = [
+    "update sent successfully",
+    "team updated successfully",
+    "project requirement updated",
+    "requirement change was clearly notified",
+    "input boxes cleared",
+    "added:",
+    "removed:",
+    "bandwidth has been recalculated",
+    "bandwidth has been released",
+]
+
+POSTKICK_STALE_KEY_PREFIXES = [
+    "postkick_success_",
+    "postkick_req_success_msg_",
+    "ld_postkick_success_",
+    "ld_success_",
+]
+
+
+def _final_clean_clear_stale_postkick_ui_state():
+    """Remove old stored success messages from Streamlit session state."""
+    try:
+        for key in list(st.session_state.keys()):
+            key_text = safe_text(key).lower()
+            value_text = safe_text(st.session_state.get(key)).lower()
+
+            remove_key = False
+
+            if any(key_text.startswith(prefix) for prefix in POSTKICK_STALE_KEY_PREFIXES):
+                remove_key = True
+
+            if any(phrase in value_text for phrase in POSTKICK_STALE_SUCCESS_PHRASES):
+                remove_key = True
+
+            if remove_key:
+                st.session_state.pop(key, None)
+    except Exception:
+        pass
+
+
+# Clear old popups immediately on every app run.
+_final_clean_clear_stale_postkick_ui_state()
+
+
+def _safe_clear_postkick_success_state(project_id, action, message):
+    """Disabled: do not store post-kickoff success messages."""
+    _final_clean_clear_stale_postkick_ui_state()
+    return None
+
+
+def _safe_show_postkick_success(project_id, action):
+    """Disabled: do not display old post-kickoff success messages."""
+    _final_clean_clear_stale_postkick_ui_state()
+    return None
+
+
+def _ld_store_success(project_id, action, message):
+    """Disabled: do not store post-kickoff success messages."""
+    _final_clean_clear_stale_postkick_ui_state()
+    return None
+
+
+def _ld_show_success(project_id, action):
+    """Disabled: do not display old post-kickoff success messages."""
+    _final_clean_clear_stale_postkick_ui_state()
+    return None
+
+
+def _final_clean_toast(message):
+    """Temporary feedback only. Nothing is stored, so it will not appear in the next login/session."""
+    _final_clean_clear_stale_postkick_ui_state()
+    try:
+        st.toast(safe_text(message), icon="✅")
+    except Exception:
+        pass
+
+
+def _bandwidth_clear_capacity_caches():
+    """Refresh workflow/cache safely without clearing login/session-related app cache."""
+    try:
+        clear_workflow_read_cache()
+    except Exception:
+        pass
+
+    try:
+        read_dynamic_capacity_sources.clear()
+    except Exception:
+        pass
+
+
+def _reqfix_clear_after_requirement_db_save():
+    """Refresh workflow/cache safely after requirement DB save."""
+    try:
+        clear_workflow_read_cache()
+    except Exception:
+        pass
+
+    try:
+        read_dynamic_capacity_sources.clear()
+    except Exception:
+        pass
+
+
+try:
+    _final_clean_previous_approve_delivery_plan_and_allocate = approve_delivery_plan_and_allocate
+except Exception:
+    _final_clean_previous_approve_delivery_plan_and_allocate = None
+
+
+def approve_delivery_plan_and_allocate(project, plan, user, manager_plan_text, selected_rows):
+    """Safety override.
+
+    If a project already has an active team, never replace the team.
+    Route post-kickoff additions to append-only add_project_members_after_kickoff().
+    """
+    if not isinstance(project, dict):
+        return False, "Project was not found."
+
+    project_id = safe_text(project.get("project_id"))
+
+    try:
+        active_allocations = get_project_allocations(project_id)
+        has_active_team = active_allocations is not None and not active_allocations.empty
+    except Exception:
+        has_active_team = False
+
+    try:
+        already_started = _postkick_is_project_started(project, plan)
+    except Exception:
+        already_started = has_active_team
+
+    if already_started and has_active_team:
+        return add_project_members_after_kickoff(
+            project,
+            plan,
+            user,
+            selected_rows,
+            data=None,
+        )
+
+    if _final_clean_previous_approve_delivery_plan_and_allocate is None:
+        return False, "Initial allocation function is unavailable."
+
+    return _final_clean_previous_approve_delivery_plan_and_allocate(
+        project,
+        plan,
+        user,
+        manager_plan_text,
+        selected_rows,
+    )
+
+
+def _final_clean_delivery_rows_for_ta(focus_proposal_id=None):
+    """Load accepted/delivery projects for Technical Architect workspace."""
+    try:
+        if "_v49_delivery_rows_for_operations" in globals():
+            rows = _v49_delivery_rows_for_operations(focus_proposal_id=focus_proposal_id)
+            if rows is not None and not rows.empty:
+                return rows
+    except Exception:
+        pass
+
+    try:
+        projects = read_simple_table("projects", PROJECT_COLUMNS)
+    except Exception:
+        return pd.DataFrame(columns=PROJECT_COLUMNS)
+
+    if projects is None or projects.empty:
+        return pd.DataFrame(columns=PROJECT_COLUMNS)
+
+    working = projects.copy()
+
+    if focus_proposal_id and "proposal_id" in working.columns:
+        working = working[working["proposal_id"].astype(str) == safe_text(focus_proposal_id)]
+
+    if working.empty:
+        return working
+
+    try:
+        plans = read_simple_table("delivery_plans", DELIVERY_PLAN_COLUMNS)
+    except Exception:
+        plans = pd.DataFrame(columns=DELIVERY_PLAN_COLUMNS)
+
+    if plans is not None and not plans.empty:
+        if focus_proposal_id and "proposal_id" in plans.columns:
+            plans = plans[plans["proposal_id"].astype(str) == safe_text(focus_proposal_id)]
+
+        try:
+            merged = plans.merge(
+                working,
+                on=["project_id", "proposal_id", "client_id"],
+                how="right",
+                suffixes=("", "_project"),
+            )
+            return merged
+        except Exception:
+            pass
+
+    for col in DELIVERY_PLAN_COLUMNS:
+        if col not in working.columns:
+            working[col] = ""
+
+    return working
+
+
+def _final_clean_project_plan_from_row(row):
+    if hasattr(row, "to_dict"):
+        row = row.to_dict()
+
+    project = {col: row.get(col, "") for col in PROJECT_COLUMNS}
+    plan = {col: row.get(col, "") for col in DELIVERY_PLAN_COLUMNS}
+
+    if not safe_text(project.get("created_at")) and safe_text(row.get("created_at_project")):
+        project["created_at"] = row.get("created_at_project")
+
+    if not safe_text(project.get("updated_at")) and safe_text(row.get("updated_at_project")):
+        project["updated_at"] = row.get("updated_at_project")
+
+    return project, plan
+
+
+def _final_clean_select_project(user, rows, focus_proposal_id=None):
+    if rows is None or rows.empty:
+        return None
+
+    try:
+        sort_col = "updated_at_project" if "updated_at_project" in rows.columns else "updated_at" if "updated_at" in rows.columns else "created_at"
+        rows = rows.sort_values(sort_col, ascending=False)
+    except Exception:
+        pass
+
+    labels = []
+    row_list = []
+
+    for idx, (_, row) in enumerate(rows.iterrows(), start=1):
+        project_id = safe_text(row.get("project_id"))
+        project_name = safe_text(row.get("project_name")) or project_id or "Accepted client project"
+        status = safe_text(row.get("approval_status")) or safe_text(row.get("project_status")) or "Waiting for review"
+        created = safe_text(row.get("created_at")) or safe_text(row.get("created_at_project")) or safe_text(row.get("updated_at"))
+        labels.append(f"{idx}. {project_name} | {project_id} | {status} | {created}")
+        row_list.append(row)
+
+    if not labels:
+        return None
+
+    if focus_proposal_id and len(labels) == 1:
+        return row_list[0]
+
+    selected = st.selectbox(
+        "Accepted projects - recent first",
+        labels,
+        key=f"final_clean_ta_project_select_{actor_id(user)}_{safe_text(focus_proposal_id) or 'all'}",
+    )
+
+    return row_list[labels.index(selected)]
+
+
+def _final_clean_available_employees(data, project_id):
+    employees = data.get("employees", pd.DataFrame()).copy() if isinstance(data, dict) else pd.DataFrame()
+
+    if employees is None or employees.empty:
+        return pd.DataFrame()
+
+    try:
+        employees = filter_project_delivery_employees(employees, data)
+    except Exception:
+        pass
+
+    if employees is None or employees.empty:
+        return pd.DataFrame()
+
+    active_ids = _team_active_employee_ids(project_id)
+
+    if "employee_id" in employees.columns:
+        employees = employees[
+            ~employees["employee_id"].astype(str).str.upper().isin(active_ids)
+        ].copy()
+
+    if employees.empty:
+        return employees
+
+    employees["label"] = employees.apply(
+        lambda r: (
+            f"{r.get('employee_id')} - {r.get('employee_name')} "
+            f"({r.get('designation')}, available "
+            f"{r.get('available_bandwidth', r.get('availability_percent', ''))}%)"
+        ),
+        axis=1,
+    )
+
+    return employees
+
+
+def _final_clean_build_selected_employee_rows(selected_labels, employees, project, default_module, default_role, allocation_percent):
+    rows = []
+
+    for label in selected_labels or []:
+        matched = employees[employees["label"] == label]
+        if matched.empty:
+            continue
+
+        emp = matched.iloc[0].to_dict()
+        module = safe_text(default_module) or safe_text(emp.get("primary_skill")) or safe_text(emp.get("designation"))
+        role = safe_text(default_role) or safe_text(emp.get("designation"))
+        allocation = safe_int(allocation_percent, 40)
+
+        rows.append({
+            "employee_id": safe_text(emp.get("employee_id")),
+            "employee_name": safe_text(emp.get("employee_name")),
+            "department": safe_text(emp.get("department")),
+            "designation": safe_text(emp.get("designation")),
+            "project_role": role,
+            "assigned_module": module,
+            "responsibility_summary": (
+                f"Assigned to support {module} for "
+                f"{project_display_name(project=project, project_id=project.get('project_id'))}. "
+                "Submit mandatory weekly progress updates and raise blockers/support needs from the employee workbench."
+            ),
+            "allocation_percent": str(allocation),
+        })
+
+    return rows
+
+
+def _final_clean_render_initial_allocation(project, plan, user, data=None):
+    """Show initial allocation only when there is no active team yet."""
+    project_id = safe_text(project.get("project_id"))
+    plan_id = safe_text(plan.get("delivery_plan_id")) or project_id
+
+    active_allocations = get_project_allocations(project_id)
+
+    if active_allocations is not None and not active_allocations.empty:
+        return
+
+    with st.expander("Initial delivery team allocation", expanded=False):
+        st.caption("Use this only before the project team is allocated for the first time.")
+
+        employees = _final_clean_available_employees(data or {}, project_id)
+
+        if employees is None or employees.empty:
+            st.warning("No eligible delivery employees are available for allocation.")
+            return
+
+        with st.form(f"final_clean_initial_alloc_form_{project_id}", clear_on_submit=True):
+            selected = st.multiselect(
+                "Select delivery employees",
+                employees["label"].tolist(),
+            )
+
+            default_module = st.text_input(
+                "Default module / work area",
+                value="Project delivery",
+            )
+
+            default_role = st.text_input(
+                "Default project role",
+                value="Delivery Engineer",
+            )
+
+            allocation_percent = st.number_input(
+                "Allocation % for selected employees",
+                min_value=5,
+                max_value=100,
+                value=40,
+                step=5,
+            )
+
+            manager_plan = st.text_area(
+                "Technical Architect delivery plan",
+                value=safe_text(plan.get("operations_manager_plan") or plan.get("operations_agent_plan")),
+                height=180,
+            )
+
+            clicked = st.form_submit_button(
+                "Approve delivery plan and allocate selected employees",
+                type="primary",
+            )
+
+        if clicked:
+            selected_rows = _final_clean_build_selected_employee_rows(
+                selected,
+                employees,
+                project,
+                default_module,
+                default_role,
+                allocation_percent,
+            )
+
+            if not selected_rows:
+                st.error("Select at least one eligible delivery employee.")
+                return
+
+            if not safe_text(manager_plan).strip():
+                st.error("Please keep or edit the delivery plan before approving.")
+                return
+
+            ok, msg = _final_clean_previous_approve_delivery_plan_and_allocate(
+                project,
+                plan,
+                user,
+                manager_plan,
+                selected_rows,
+            )
+
+            if ok:
+                _final_clean_toast("Initial team allocation saved.")
+            else:
+                st.error(msg)
+
+
+def _final_clean_render_postkick_controls_for_project(project, plan, user, data=None):
+    """Post-kickoff controls without sticky success popups."""
+    _final_clean_clear_stale_postkick_ui_state()
+
+    project_id = safe_text(project.get("project_id"))
+    plan_id = safe_text(plan.get("delivery_plan_id")) or project_id
+
+    active_allocations = get_project_allocations(project_id)
+    active_count = 0 if active_allocations is None or active_allocations.empty else len(active_allocations)
+
+    st.markdown(
+        """
+        <div class="dd-section-card dd-dashboard-shell">
+            <div class="dd-section-title">Post-kickoff project controls</div>
+            <div class="dd-section-subtitle">
+                Update requirements, add employees, or remove employees after kickoff.
+                Sticky success popups are disabled. Client and CEO are not notified from these controls.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Project", project_display_name(project=project, project_id=project_id))
+    c2.metric("Active employees", active_count)
+    c3.metric("Status", safe_text(project.get("project_status"), "In progress"))
+
+    # -------------------------------------------------------------------------
+    # Requirement change
+    # -------------------------------------------------------------------------
+    with st.expander("Change project requirement after kickoff", expanded=False):
+        current_week = _postkick_current_week_number(project_id)
+
+        st.warning(
+            f"This will preserve completed weeks and regenerate pending targets from Week {current_week} onward. "
+            "Allocated project members are notified. Client and CEO are not notified."
+        )
+
+        current_requirement = safe_text(plan.get("raw_requirement_text"))
+        if current_requirement:
+            st.text_area(
+                "Current saved requirement",
+                value=current_requirement,
+                height=150,
+                disabled=True,
+                key=f"final_clean_current_req_{project_id}",
+            )
+
+        with st.form(f"final_clean_req_change_form_{project_id}", clear_on_submit=True):
+            updated_requirement = st.text_area(
+                "Updated requirement / changed requirement",
+                height=180,
+                placeholder="Enter the latest changed requirement or full corrected requirement.",
+            )
+
+            change_note = st.text_area(
+                "Reason / change summary for project team",
+                height=90,
+                placeholder="Example: Client clarified branch-wise access and dashboard priority.",
+            )
+
+            req_clicked = st.form_submit_button(
+                "Save requirement change and notify project members",
+                type="primary",
+            )
+
+        if req_clicked:
+            ok, msg = save_postkick_requirement_change(
+                project,
+                plan,
+                user,
+                updated_requirement,
+                change_note,
+                data=data,
+            )
+
+            if ok:
+                _final_clean_toast("Requirement change saved and project members notified.")
+            else:
+                st.error(msg)
+
+    # -------------------------------------------------------------------------
+    # Add employees
+    # -------------------------------------------------------------------------
+    with st.expander("Add more delivery employees after kickoff", expanded=False):
+        st.caption(
+            "Append-only team update. Existing active employees will not be removed or replaced."
+        )
+
+        employees = _final_clean_available_employees(data or {}, project_id)
+
+        if employees is None or employees.empty:
+            st.info("All eligible delivery employees are already active on this project, or no eligible employees are available.")
+        else:
+            with st.form(f"final_clean_add_people_form_{project_id}", clear_on_submit=True):
+                selected = st.multiselect(
+                    "Select additional delivery employees",
+                    employees["label"].tolist(),
+                )
+
+                default_module = st.text_input(
+                    "Default module / work area for selected employees",
+                    value="Project delivery support",
+                )
+
+                default_role = st.text_input(
+                    "Default project role for selected employees",
+                    value="Delivery Engineer",
+                )
+
+                allocation_percent = st.number_input(
+                    "Allocation % for selected employees",
+                    min_value=5,
+                    max_value=100,
+                    value=40,
+                    step=5,
+                )
+
+                add_clicked = st.form_submit_button(
+                    "Add selected employees without removing existing team",
+                    type="primary",
+                )
+
+            if add_clicked:
+                selected_rows = _final_clean_build_selected_employee_rows(
+                    selected,
+                    employees,
+                    project,
+                    default_module,
+                    default_role,
+                    allocation_percent,
+                )
+
+                ok, msg = add_project_members_after_kickoff(
+                    project,
+                    plan,
+                    user,
+                    selected_rows,
+                    data=data,
+                )
+
+                if ok:
+                    _final_clean_toast("Team updated. Existing employees were preserved.")
+                else:
+                    st.error(msg)
+
+    # -------------------------------------------------------------------------
+    # Remove employees
+    # -------------------------------------------------------------------------
+    with st.expander("Remove employees from this project if necessary", expanded=False):
+        st.caption(
+            "This is a soft remove. It keeps history, releases bandwidth, and hides the project from the removed employee dashboard."
+        )
+
+        active_allocations = get_project_allocations(project_id)
+
+        if active_allocations is None or active_allocations.empty:
+            st.info("No active employees are currently allocated to this project.")
+        else:
+            remove_options = []
+            remove_map = {}
+
+            for _, row in active_allocations.iterrows():
+                row_dict = row.to_dict()
+                label = _team_employee_label(row_dict)
+                remove_options.append(label)
+                remove_map[label] = safe_text(row_dict.get("employee_id")).upper()
+
+            with st.form(f"final_clean_remove_people_form_{project_id}", clear_on_submit=True):
+                selected_remove_labels = st.multiselect(
+                    "Select employees to remove from active project team",
+                    remove_options,
+                )
+
+                remove_reason = st.text_area(
+                    "Removal reason / note",
+                    height=90,
+                    placeholder="Example: Module completed, employee moved to another project, replacement added, or allocation no longer needed.",
+                )
+
+                removing_all = len(selected_remove_labels) == len(remove_options) and len(remove_options) > 0
+                allow_remove_all = False
+
+                if removing_all:
+                    allow_remove_all = st.checkbox(
+                        "I understand this will leave the project with no active delivery employees.",
+                    )
+
+                remove_clicked = st.form_submit_button(
+                    "Remove selected employees from this project",
+                    type="primary",
+                )
+
+            if remove_clicked:
+                employee_ids = [
+                    remove_map[label]
+                    for label in selected_remove_labels
+                    if label in remove_map
+                ]
+
+                ok, msg = remove_project_members_after_kickoff(
+                    project,
+                    plan,
+                    user,
+                    employee_ids,
+                    remove_reason,
+                    data=data,
+                    allow_remove_all=allow_remove_all,
+                )
+
+                if ok:
+                    _final_clean_toast("Selected employee(s) removed and bandwidth released.")
+                else:
+                    st.error(msg)
+
+
+def render_postkick_requirement_and_team_controls(user, data=None, focus_proposal_id=None):
+    """Standalone post-kickoff control panel with no stored success popups."""
+    _final_clean_clear_stale_postkick_ui_state()
+
+    if role_key_for_user(user) != "operations":
+        return
+
+    projects = _postkick_get_active_projects_for_ta(focus_proposal_id=focus_proposal_id)
+
+    if projects is None or projects.empty:
+        return
+
+    labels = []
+    rows = []
+
+    for idx, (_, row) in enumerate(projects.iterrows(), start=1):
+        project_id = safe_text(row.get("project_id"))
+        labels.append(
+            f"{idx}. {project_display_name(project=row, project_id=project_id)} | "
+            f"{project_id} | {safe_text(row.get('project_status'))}"
+        )
+        rows.append(row.to_dict())
+
+    if not labels:
+        return
+
+    if focus_proposal_id and len(labels) == 1:
+        project = rows[0]
+    else:
+        selected_label = st.selectbox(
+            "Choose active project for post-kickoff update",
+            labels,
+            key=f"final_clean_postkick_project_select_{actor_id(user)}_{safe_text(focus_proposal_id) or 'all'}",
+        )
+        project = rows[labels.index(selected_label)]
+
+    project_id = safe_text(project.get("project_id"))
+    plan = get_delivery_plan_for_client_project(project_id)
+
+    if not plan:
+        st.info("Delivery plan is not available yet for this project.")
+        return
+
+    _final_clean_render_postkick_controls_for_project(project, plan, user, data=data)
+
+
+def render_operations_delivery_workspace(user, data, focus_proposal_id=None):
+    """Clean Technical Architect workspace.
+
+    Important:
+    - Does NOT call older stacked workspace wrappers.
+    - Removes duplicate post-kickoff panels.
+    - Removes sticky success messages.
+    - Keeps initial allocation separate from post-kickoff add/remove.
+    """
+    _final_clean_clear_stale_postkick_ui_state()
+
+    if role_key_for_user(user) != "operations":
+        return
+
+    st.markdown(
+        """
+        <div class="dd-section-card dd-dashboard-shell">
+            <div class="dd-section-eyebrow">Technical Architect workspace</div>
+            <div class="dd-section-title">Project delivery control center</div>
+            <div class="dd-section-subtitle">
+                Select an accepted project. Review week status, targets, requirement, client conversation,
+                employee updates, and team controls from one clean workspace.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    rows = _final_clean_delivery_rows_for_ta(focus_proposal_id=focus_proposal_id)
+
+    if rows is None or rows.empty:
+        st.info("No accepted client projects are available yet.")
+        return
+
+    selected_row = _final_clean_select_project(user, rows, focus_proposal_id=focus_proposal_id)
+
+    if selected_row is None:
+        st.info("Select a project to open its delivery workspace.")
+        return
+
+    project, plan = _final_clean_project_plan_from_row(selected_row)
+    project_id = safe_text(project.get("project_id"))
+    proposal_id = safe_text(project.get("proposal_id"))
+
+    if not project_id:
+        st.warning("Selected project has no project ID.")
+        return
+
+    proposal_report = get_proposal_report_by_id(proposal_id) or {}
+    active_allocations = get_project_allocations(project_id)
+    all_employee_updates = get_employee_project_updates(project_id=project_id)
+    open_employee_updates = get_open_employee_project_updates(project_id=project_id)
+
+    active_count = 0 if active_allocations is None or active_allocations.empty else len(active_allocations)
+    open_count = 0 if open_employee_updates is None or open_employee_updates.empty else len(open_employee_updates)
+
+    st.markdown(
+        f"""
+        <div class="dd-project-card">
+            <div class="dd-card-header-row">
+                <div>
+                    <div class="dd-card-kicker">Selected accepted project</div>
+                    <div class="dd-card-title-small">{safe_text(project.get('project_name')) or safe_text(project_id)}</div>
+                    <div class="dd-card-subtle">Project ID: {safe_text(project_id)}</div>
+                </div>
+                <div class="dd-status-pill">{safe_text(project.get('project_status')) or 'In progress'}</div>
+            </div>
+            <div class="dd-metric-grid">
+                <div class="dd-mini-metric"><span>Delivery status</span><strong>{safe_text(plan.get('approval_status')) or 'Waiting for review'}</strong></div>
+                <div class="dd-mini-metric"><span>Active employees</span><strong>{active_count}</strong></div>
+                <div class="dd-mini-metric"><span>Open employee requests</span><strong>{open_count}</strong></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if "_v49_project_week_status_first_panel" in globals():
+        _v49_project_week_status_first_panel(
+            project_id,
+            project_label=project_display_name(project=project, project_id=project_id),
+            key_prefix=f"final_clean_week_{project_id}",
+        )
+    else:
+        render_project_week_status_panel(
+            project_id,
+            title="Current project week update status",
+            expanded=True,
+            client_safe=False,
+            key_prefix=f"final_clean_week_{project_id}",
+        )
+
+    if safe_text(plan.get("delivery_plan_id")):
+        render_weekly_targets_panel(
+            plan,
+            title="Weekly targets for this project",
+            expanded=True,
+            client_safe=False,
+            key_prefix=f"final_clean_targets_{project_id}",
+        )
+
+        st.markdown("### Requirement and Technical Architect analysis")
+
+        requirement_text = safe_text(plan.get("raw_requirement_text"))
+        if requirement_text:
+            with st.expander("Client requirement", expanded=True):
+                st.text_area(
+                    "Requirement provided by client",
+                    value=requirement_text,
+                    height=160,
+                    disabled=True,
+                    key=f"final_clean_req_{project_id}",
+                )
+
+        agent_conclusion = safe_text(plan.get("operations_agent_plan"))
+        with st.expander("Technical Architect Agent conclusion", expanded=False):
+            if agent_conclusion:
+                st.text_area(
+                    "AI delivery analysis and conclusion",
+                    value=agent_conclusion,
+                    height=230,
+                    disabled=True,
+                    key=f"final_clean_agent_plan_{project_id}",
+                )
+            else:
+                st.info("Technical Architect Agent conclusion is not available yet.")
+
+        st.markdown("### Client / Technical Architect conversation")
+        try:
+            render_client_operations_conversation(
+                project,
+                proposal_report,
+                {
+                    "client_id": project.get("client_id"),
+                    "client_name": safe_text(proposal_report.get("client_name")),
+                },
+                viewer="operations",
+                user=user,
+            )
+        except Exception:
+            st.info("Client conversation is not available right now.")
+
+        st.markdown("### Employee requests and weekly updates")
+        render_employee_update_inbox_with_done(
+            all_employee_updates,
+            user,
+            project_id,
+            key_prefix=f"final_clean_employee_updates_{project_id}",
+        )
+
+        with st.expander("Allocated team summary", expanded=False):
+            if active_allocations is None or active_allocations.empty:
+                st.info("No employees are currently allocated.")
+            else:
+                cols = [
+                    c for c in [
+                        "employee_name",
+                        "project_role",
+                        "assigned_module",
+                        "allocation_percent",
+                        "allocation_status",
+                    ]
+                    if c in active_allocations.columns
+                ]
+                st.dataframe(active_allocations[cols], use_container_width=True, hide_index=True)
+
+        _final_clean_render_initial_allocation(project, plan, user, data=data)
+
+        if _postkick_is_project_started(project, plan):
+            _final_clean_render_postkick_controls_for_project(project, plan, user, data=data)
+
+    else:
+        st.info(
+            "Accepted project exists, but the client has not submitted the detailed requirement yet. "
+            "Delivery plan and weekly targets will appear after client requirement submission."
+        )
