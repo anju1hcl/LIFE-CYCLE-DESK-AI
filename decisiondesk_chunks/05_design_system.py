@@ -12013,24 +12013,519 @@ def render_operations_delivery_workspace(user, data, focus_proposal_id=None):
             "Delivery plan and weekly targets will appear after client requirement submission."
         )
 
+# # =============================================================================
+# # FINAL PATCH: FLEXIBLE HR BANDWIDTH / ROLE CAPACITY MATCHING
+# # Paste at the VERY BOTTOM of decisiondesk_chunks/05_design_system.py
+# # =============================================================================
+
+# def _capacity_role_aliases(role):
+#     """Return flexible aliases for requirement role matching."""
+#     role_text = safe_text(role).lower()
+
+#     alias_map = {
+#         "ai/ml engineer": ["ai/ml engineer", "ai ml engineer", "machine learning", "ml engineer", "ai engineer", "data scientist", "ai/ml engineer trainee"],
+#         "backend developer": ["backend developer", "backend engineer", "python developer", "api developer", "server developer"],
+#         "frontend developer": ["frontend developer", "frontend engineer", "react developer", "ui developer", "web developer"],
+#         "full stack developer": ["full stack developer", "fullstack developer", "full stack engineer", "software engineer"],
+#         "devops engineer": ["devops engineer", "cloud engineer", "deployment engineer", "site reliability", "sre"],
+#         "qa engineer": ["qa engineer", "qa tester", "test engineer", "quality analyst", "quality assurance"],
+#         "data engineer": ["data engineer", "etl developer", "pipeline engineer", "data pipeline", "analytics engineer"],
+#         "project manager": ["project manager", "technical architect", "delivery manager", "scrum master"],
+#     }
+
+#     aliases = [role_text]
+
+#     for key, values in alias_map.items():
+#         if role_text == key or key in role_text or role_text in key:
+#             aliases.extend(values)
+
+#     clean = []
+#     for item in aliases:
+#         item = safe_text(item).lower().strip()
+#         if item and item not in clean:
+#             clean.append(item)
+
+#     return clean
+
+
+# def _capacity_employee_matches_role(employee_row, required_role):
+#     """Flexible employee-role match using designation, department, skills, and role text."""
+#     if employee_row is None:
+#         return False
+
+#     if hasattr(employee_row, "to_dict"):
+#         employee_row = employee_row.to_dict()
+
+#     aliases = _capacity_role_aliases(required_role)
+
+#     fields = []
+#     for col in [
+#         "designation",
+#         "employee_designation",
+#         "department",
+#         "primary_skill",
+#         "skill",
+#         "skills",
+#         "domain",
+#         "project_role",
+#     ]:
+#         fields.append(safe_text(employee_row.get(col)))
+
+#     combined = " | ".join(fields).lower()
+
+#     if not combined.strip():
+#         return False
+
+#     for alias in aliases:
+#         if alias and alias in combined:
+#             return True
+
+#     required_words = [
+#         word for word in re.split(r"[^a-z0-9]+", safe_text(required_role).lower())
+#         if len(word) >= 3
+#     ]
+
+#     if required_words:
+#         hits = sum(1 for word in required_words if word in combined)
+#         return hits >= max(1, min(2, len(required_words)))
+
+#     return False
+
+
+# def build_dynamic_role_capacity(required_roles, employees, new_project_timeline_months=0):
+#     """Flexible live/projected capacity by role.
+
+#     Fix:
+#     - No active Supabase allocations means workload load is 0.
+#     - Employees are matched flexibly by designation/skill/department.
+#     - If matching employees exist, HR should not show hiring gap only because exact designation text differs.
+#     """
+#     dynamic_employees = build_dynamic_employee_capacity(employees, new_project_timeline_months)
+#     rows = []
+
+#     if dynamic_employees is None or getattr(dynamic_employees, "empty", True):
+#         dynamic_employees = pd.DataFrame()
+
+#     for _, req_row in required_roles.iterrows():
+#         role = safe_text(req_row.get("required_role"))
+#         needed = safe_number(req_row.get("required_people"), 0)
+
+#         if dynamic_employees.empty:
+#             matching = pd.DataFrame()
+#         else:
+#             match_mask = dynamic_employees.apply(
+#                 lambda emp_row: _capacity_employee_matches_role(emp_row, role),
+#                 axis=1,
+#             )
+#             matching = dynamic_employees[match_mask].copy()
+
+#         if matching.empty:
+#             avg_salary = 90000
+#             available_now_fte = 0.0
+#             projected_available_fte = 0.0
+#             active_allocated_fte = 0.0
+#             avg_progress = 0.0
+#             blockers = 0
+#             nearest_release = ""
+#             capacity_notes = "No matching employee found for this role after flexible designation/skill matching."
+#         else:
+#             avg_salary = safe_number(
+#                 pd.to_numeric(matching.get("monthly_ctc"), errors="coerce").dropna().mean(),
+#                 90000,
+#             )
+
+#             available_now_fte = (
+#                 pd.to_numeric(matching.get("availability_percent", 0), errors="coerce")
+#                 .fillna(0)
+#                 .clip(lower=0)
+#                 .sum()
+#                 / 100
+#             )
+
+#             projected_available_fte = (
+#                 pd.to_numeric(matching.get("projected_available_percent", matching.get("availability_percent", 0)), errors="coerce")
+#                 .fillna(0)
+#                 .clip(lower=0)
+#                 .sum()
+#                 / 100
+#             )
+
+#             active_allocated_fte = (
+#                 pd.to_numeric(matching.get("live_allocated_percent", 0), errors="coerce")
+#                 .fillna(0)
+#                 .clip(lower=0)
+#                 .sum()
+#                 / 100
+#             )
+
+#             progress_values = pd.to_numeric(
+#                 matching.get("avg_project_progress_percent", 0),
+#                 errors="coerce",
+#             ).fillna(0)
+#             progress_values = progress_values[progress_values > 0]
+#             avg_progress = float(progress_values.mean()) if len(progress_values) else 0.0
+
+#             blockers = int(
+#                 pd.to_numeric(matching.get("hurdle_count", 0), errors="coerce")
+#                 .fillna(0)
+#                 .sum()
+#             )
+
+#             release_dates = [
+#                 safe_text(v)
+#                 for v in matching.get("next_release_date", [])
+#                 if safe_text(v)
+#             ]
+#             nearest_release = min(release_dates) if release_dates else ""
+
+#             matched_names = []
+#             for _, emp_row in matching.head(4).iterrows():
+#                 matched_names.append(
+#                     safe_text(emp_row.get("employee_name"))
+#                     or safe_text(emp_row.get("employee_id"))
+#                 )
+
+#             capacity_notes = (
+#                 f"Matched {len(matching)} employee(s): "
+#                 + ", ".join([name for name in matched_names if name])
+#                 + "."
+#             )
+
+#         rows.append({
+#             "role": role,
+#             "needed": round(needed, 2),
+#             "available_capacity": round(projected_available_fte, 2),
+#             "available_now_fte": round(available_now_fte, 2),
+#             "projected_available_fte": round(projected_available_fte, 2),
+#             "active_allocated_fte": round(active_allocated_fte, 2),
+#             "gap": round(max(0, needed - projected_available_fte), 2),
+#             "immediate_gap": round(max(0, needed - available_now_fte), 2),
+#             "avg_current_project_progress_percent": round(avg_progress, 2),
+#             "hurdle_or_support_request_count": blockers,
+#             "nearest_release_date": nearest_release,
+#             "capacity_notes": capacity_notes,
+#             "avg_monthly_salary": round(avg_salary, 2),
+#         })
+
+#     return rows
+
 # =============================================================================
-# FINAL PATCH: FLEXIBLE HR BANDWIDTH / ROLE CAPACITY MATCHING
+# FINAL PATCH: INTERNAL AGENTS USE SUPABASE PROJECT_ALLOCATIONS FOR LIVE BANDWIDTH
 # Paste at the VERY BOTTOM of decisiondesk_chunks/05_design_system.py
 # =============================================================================
+# Business rule:
+# - Excel is static master data only: users, employees, domain, skills, designation, salary, requirement templates.
+# - Supabase project_allocations is the only dynamic bandwidth source.
+# - Excel availability_percent is ignored.
+# - If project_allocations has no active rows, every eligible delivery employee has 100% bandwidth = 1.0 FTE.
+# =============================================================================
 
-def _capacity_role_aliases(role):
-    """Return flexible aliases for requirement role matching."""
-    role_text = safe_text(role).lower()
+_BWDB_PROJECT_ALLOCATION_COLUMNS = [
+    "allocation_id",
+    "project_id",
+    "proposal_id",
+    "client_id",
+    "employee_id",
+    "employee_name",
+    "employee_department",
+    "employee_designation",
+    "project_role",
+    "assigned_module",
+    "responsibility_summary",
+    "allocation_percent",
+    "start_date",
+    "end_date",
+    "assigned_by",
+    "assigned_at",
+    "allocation_status",
+]
+
+_BWDB_ACTIVE_STATUSES = {
+    "active",
+    "assigned",
+    "in progress",
+    "approved",
+}
+
+_BWDB_INACTIVE_STATUSES = {
+    "removed",
+    "released",
+    "inactive",
+    "closed",
+    "completed",
+    "cancelled",
+    "canceled",
+}
+
+
+def _bwdb_norm_id(value):
+    return safe_text(value).strip().upper()
+
+
+def _bwdb_read_active_project_allocations():
+    """Read active allocation rows from Supabase project_allocations.
+
+    Empty table means nobody is allocated, so used bandwidth is zero.
+    """
+    try:
+        df = read_simple_table("project_allocations", _BWDB_PROJECT_ALLOCATION_COLUMNS)
+    except Exception:
+        return pd.DataFrame(columns=_BWDB_PROJECT_ALLOCATION_COLUMNS)
+
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_BWDB_PROJECT_ALLOCATION_COLUMNS)
+
+    working = df.copy()
+
+    if "allocation_status" not in working.columns:
+        working["allocation_status"] = "Active"
+
+    status = (
+        working["allocation_status"]
+        .fillna("Active")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+    )
+
+    working = working[
+        status.isin(_BWDB_ACTIVE_STATUSES)
+        & ~status.isin(_BWDB_INACTIVE_STATUSES)
+    ].copy()
+
+    if working.empty:
+        return pd.DataFrame(columns=_BWDB_PROJECT_ALLOCATION_COLUMNS)
+
+    working["employee_id_norm"] = working["employee_id"].apply(_bwdb_norm_id)
+
+    working["allocation_percent_num"] = pd.to_numeric(
+        working["allocation_percent"],
+        errors="coerce",
+    ).fillna(0).clip(lower=0, upper=100)
+
+    working = working[working["employee_id_norm"] != ""].copy()
+
+    return working
+
+
+def _bwdb_used_percent_by_employee():
+    """Return employee_id -> used allocation percent from Supabase only."""
+    active = _bwdb_read_active_project_allocations()
+
+    if active is None or active.empty:
+        return {}
+
+    return (
+        active
+        .groupby("employee_id_norm")["allocation_percent_num"]
+        .sum()
+        .clip(lower=0, upper=100)
+        .to_dict()
+    )
+
+
+def _bwdb_executive_ids_from_data(data):
+    ids = set()
+
+    try:
+        users = data.get("users", pd.DataFrame()) if isinstance(data, dict) else pd.DataFrame()
+    except Exception:
+        users = pd.DataFrame()
+
+    if users is None or users.empty:
+        return ids
+
+    for _, row in users.iterrows():
+        role = safe_text(row.get("role")).lower()
+        designation = safe_text(row.get("designation")).lower()
+        department = safe_text(row.get("department")).lower()
+        user_id = _bwdb_norm_id(row.get("user_id") or row.get("employee_id"))
+
+        is_executive = (
+            role in ["executive", "founder", "ceo"]
+            or "executive" in designation
+            or "founder" in designation
+            or "ceo" in designation
+            or (
+                "manager" in designation
+                and any(word in department for word in ["sales", "finance", "hr", "human resource", "strategy"])
+            )
+        )
+
+        if is_executive and user_id:
+            ids.add(user_id)
+
+    return ids
+
+
+def _bwdb_is_delivery_employee(row, executive_ids=None):
+    """Use Excel/static user/domain fields only to decide whether employee is delivery-eligible."""
+    executive_ids = executive_ids or set()
+
+    if hasattr(row, "to_dict"):
+        row = row.to_dict()
+
+    emp_id = _bwdb_norm_id(row.get("employee_id") or row.get("user_id"))
+    role = safe_text(row.get("role")).lower()
+    designation = safe_text(row.get("designation") or row.get("employee_designation")).lower()
+    department = safe_text(row.get("department") or row.get("employee_department")).lower()
+    domain = safe_text(row.get("domain") or row.get("primary_skill") or row.get("skills") or row.get("skill")).lower()
+
+    if emp_id and emp_id in executive_ids:
+        return False
+
+    if role in ["executive", "founder", "ceo"]:
+        return False
+
+    if any(word in designation for word in ["executive", "founder", "ceo"]):
+        return False
+
+    if department in ["sales", "finance", "hr", "human resources", "strategy", "business strategy"]:
+        return False
+
+    blocked_domain_words = [
+        "enterprise sales",
+        "financial planning",
+        "hr operations",
+        "human resource",
+        "business strategy",
+    ]
+
+    if any(word in domain for word in blocked_domain_words):
+        return False
+
+    return bool(emp_id)
+
+
+def filter_project_delivery_employees(employees, data=None):
+    """Delivery employee filter using static Excel/user data, then Supabase-only bandwidth."""
+    if employees is None or getattr(employees, "empty", True):
+        return employees
+
+    df = employees.copy()
+
+    if "employee_id" not in df.columns and "user_id" in df.columns:
+        df["employee_id"] = df["user_id"]
+
+    executive_ids = _bwdb_executive_ids_from_data(data)
+
+    rows = []
+    for _, row in df.iterrows():
+        row_dict = row.to_dict()
+        if _bwdb_is_delivery_employee(row_dict, executive_ids):
+            rows.append(row_dict)
+
+    if not rows:
+        return df.iloc[0:0].copy()
+
+    filtered = pd.DataFrame(rows)
+
+    return build_dynamic_employee_capacity(filtered)
+
+
+def build_dynamic_employee_capacity(employees, new_project_timeline_months=0):
+    """Supabase-only live bandwidth calculation.
+
+    Formula:
+        base bandwidth = 100%
+        used bandwidth = active project_allocations.allocation_percent
+        available bandwidth = 100 - used bandwidth
+
+    Excel availability_percent is ignored completely.
+    """
+    if employees is None or getattr(employees, "empty", True):
+        return employees
+
+    df = employees.copy()
+
+    if "employee_id" not in df.columns and "user_id" in df.columns:
+        df["employee_id"] = df["user_id"]
+
+    if "employee_id" not in df.columns:
+        return df
+
+    used_by_employee = _bwdb_used_percent_by_employee()
+
+    def _used(row):
+        emp_id = _bwdb_norm_id(row.get("employee_id") or row.get("user_id"))
+        return max(0.0, min(100.0, safe_number(used_by_employee.get(emp_id, 0), 0)))
+
+    df["base_availability_percent"] = 100.0
+    df["live_allocated_percent"] = df.apply(_used, axis=1)
+    df["availability_percent"] = df["live_allocated_percent"].apply(
+        lambda used: max(0.0, 100.0 - safe_number(used, 0))
+    )
+    df["projected_available_percent"] = df["availability_percent"]
+    df["projected_release_percent"] = 0.0
+
+    df["available_bandwidth"] = df["availability_percent"].apply(
+        lambda value: f"{safe_number(value, 0):.0f}%"
+    )
+
+    df["active_project_count"] = df["live_allocated_percent"].apply(
+        lambda value: 1 if safe_number(value, 0) > 0 else 0
+    )
+    df["avg_project_progress_percent"] = 0.0
+    df["hurdle_count"] = 0
+    df["next_release_date"] = ""
+
+    df["capacity_notes"] = df.apply(
+        lambda row: (
+            "Bandwidth source: Supabase project_allocations only. "
+            "Excel availability_percent ignored. "
+            "Static Excel data used only for employee/user/domain/skill/salary. "
+            f"Base: 100%; active allocated: {safe_number(row.get('live_allocated_percent'), 0):.0f}%; "
+            f"available: {safe_number(row.get('availability_percent'), 0):.0f}%."
+        ),
+        axis=1,
+    )
+
+    return df
+
+
+def adjust_employee_availability_with_dynamic_allocations(employees, new_project_timeline_months=0):
+    """Compatibility wrapper for older code paths."""
+    return build_dynamic_employee_capacity(employees, new_project_timeline_months)
+
+
+def _bwdb_role_aliases(role):
+    role_text = safe_text(role).lower().strip()
 
     alias_map = {
-        "ai/ml engineer": ["ai/ml engineer", "ai ml engineer", "machine learning", "ml engineer", "ai engineer", "data scientist", "ai/ml engineer trainee"],
-        "backend developer": ["backend developer", "backend engineer", "python developer", "api developer", "server developer"],
-        "frontend developer": ["frontend developer", "frontend engineer", "react developer", "ui developer", "web developer"],
-        "full stack developer": ["full stack developer", "fullstack developer", "full stack engineer", "software engineer"],
-        "devops engineer": ["devops engineer", "cloud engineer", "deployment engineer", "site reliability", "sre"],
-        "qa engineer": ["qa engineer", "qa tester", "test engineer", "quality analyst", "quality assurance"],
-        "data engineer": ["data engineer", "etl developer", "pipeline engineer", "data pipeline", "analytics engineer"],
-        "project manager": ["project manager", "technical architect", "delivery manager", "scrum master"],
+        "ai/ml engineer": [
+            "ai/ml engineer", "ai ml engineer", "ai engineer", "ml engineer",
+            "machine learning", "data scientist", "llm", "rag", "genai", "generative ai"
+        ],
+        "backend developer": [
+            "backend developer", "backend engineer", "python developer",
+            "api developer", "server developer", "fastapi", "django", "flask"
+        ],
+        "frontend developer": [
+            "frontend developer", "frontend engineer", "react developer",
+            "ui developer", "web developer", "streamlit", "angular", "vue"
+        ],
+        "full stack developer": [
+            "full stack developer", "fullstack developer", "full stack engineer",
+            "software engineer", "application developer"
+        ],
+        "devops engineer": [
+            "devops engineer", "cloud engineer", "deployment engineer",
+            "sre", "site reliability", "docker", "github", "aws", "azure", "gcp"
+        ],
+        "qa engineer": [
+            "qa engineer", "qa tester", "test engineer", "quality analyst",
+            "quality assurance", "testing"
+        ],
+        "data engineer": [
+            "data engineer", "etl developer", "pipeline engineer",
+            "analytics engineer", "data pipeline", "postgresql", "sql"
+        ],
+        "technical architect": [
+            "technical architect", "solution architect", "architect"
+        ],
+        "ui/ux designer": [
+            "ui designer", "ux designer", "ui/ux designer", "product designer"
+        ],
     }
 
     aliases = [role_text]
@@ -12048,25 +12543,24 @@ def _capacity_role_aliases(role):
     return clean
 
 
-def _capacity_employee_matches_role(employee_row, required_role):
-    """Flexible employee-role match using designation, department, skills, and role text."""
-    if employee_row is None:
-        return False
-
+def _bwdb_employee_matches_required_role(employee_row, required_role):
+    """Match required role against static Excel designation/domain/skill fields."""
     if hasattr(employee_row, "to_dict"):
         employee_row = employee_row.to_dict()
 
-    aliases = _capacity_role_aliases(required_role)
+    aliases = _bwdb_role_aliases(required_role)
 
     fields = []
     for col in [
+        "employee_name",
         "designation",
         "employee_designation",
         "department",
+        "employee_department",
+        "domain",
         "primary_skill",
         "skill",
         "skills",
-        "domain",
         "project_role",
     ]:
         fields.append(safe_text(employee_row.get(col)))
@@ -12080,31 +12574,61 @@ def _capacity_employee_matches_role(employee_row, required_role):
         if alias and alias in combined:
             return True
 
+    generic_words = {
+        "engineer", "developer", "specialist", "consultant",
+        "senior", "junior", "trainee", "lead", "associate",
+    }
+
     required_words = [
-        word for word in re.split(r"[^a-z0-9]+", safe_text(required_role).lower())
-        if len(word) >= 3
+        word
+        for word in re.split(r"[^a-z0-9]+", safe_text(required_role).lower())
+        if len(word) >= 3 and word not in generic_words
     ]
 
-    if required_words:
-        hits = sum(1 for word in required_words if word in combined)
-        return hits >= max(1, min(2, len(required_words)))
+    if not required_words:
+        return False
 
-    return False
+    hits = sum(1 for word in required_words if word in combined)
+
+    return hits >= 1
+
+
+def _bwdb_salary_average(matching):
+    if matching is None or matching.empty:
+        return 90000
+
+    for col in ["monthly_ctc", "salary", "monthly_salary", "ctc"]:
+        if col in matching.columns:
+            values = pd.to_numeric(matching[col], errors="coerce").dropna()
+            if not values.empty:
+                return safe_number(values.mean(), 90000)
+
+    return 90000
 
 
 def build_dynamic_role_capacity(required_roles, employees, new_project_timeline_months=0):
-    """Flexible live/projected capacity by role.
+    """Role capacity used by the internal agent meeting.
 
-    Fix:
-    - No active Supabase allocations means workload load is 0.
-    - Employees are matched flexibly by designation/skill/department.
-    - If matching employees exist, HR should not show hiring gap only because exact designation text differs.
+    Uses:
+    - Excel/static data for required role, employee identity, designation, domain, skill, salary.
+    - Supabase project_allocations for live bandwidth only.
+
+    Empty project_allocations:
+    - every matching delivery employee contributes 1.0 FTE.
     """
-    dynamic_employees = build_dynamic_employee_capacity(employees, new_project_timeline_months)
     rows = []
+
+    if required_roles is None or getattr(required_roles, "empty", True):
+        return rows
+
+    delivery_employees = filter_project_delivery_employees(employees, data if "data" in globals() else None)
+    dynamic_employees = build_dynamic_employee_capacity(delivery_employees, new_project_timeline_months)
 
     if dynamic_employees is None or getattr(dynamic_employees, "empty", True):
         dynamic_employees = pd.DataFrame()
+
+    active_allocations = _bwdb_read_active_project_allocations()
+    active_allocation_count = 0 if active_allocations is None or active_allocations.empty else len(active_allocations)
 
     for _, req_row in required_roles.iterrows():
         role = safe_text(req_row.get("required_role"))
@@ -12114,82 +12638,73 @@ def build_dynamic_role_capacity(required_roles, employees, new_project_timeline_
             matching = pd.DataFrame()
         else:
             match_mask = dynamic_employees.apply(
-                lambda emp_row: _capacity_employee_matches_role(emp_row, role),
+                lambda employee_row: _bwdb_employee_matches_required_role(employee_row, role),
                 axis=1,
             )
             matching = dynamic_employees[match_mask].copy()
 
         if matching.empty:
-            avg_salary = 90000
             available_now_fte = 0.0
             projected_available_fte = 0.0
             active_allocated_fte = 0.0
-            avg_progress = 0.0
-            blockers = 0
-            nearest_release = ""
-            capacity_notes = "No matching employee found for this role after flexible designation/skill matching."
-        else:
-            avg_salary = safe_number(
-                pd.to_numeric(matching.get("monthly_ctc"), errors="coerce").dropna().mean(),
-                90000,
+            avg_salary = 90000
+            capacity_notes = (
+                "No matching delivery employee found in static Excel employee/user/domain/skill data for this required role. "
+                "Supabase project_allocations bandwidth may be free, but role/domain match is missing."
             )
-
+        else:
             available_now_fte = (
-                pd.to_numeric(matching.get("availability_percent", 0), errors="coerce")
+                pd.to_numeric(matching["availability_percent"], errors="coerce")
                 .fillna(0)
-                .clip(lower=0)
+                .clip(lower=0, upper=100)
                 .sum()
                 / 100
             )
 
             projected_available_fte = (
-                pd.to_numeric(matching.get("projected_available_percent", matching.get("availability_percent", 0)), errors="coerce")
+                pd.to_numeric(matching["projected_available_percent"], errors="coerce")
                 .fillna(0)
-                .clip(lower=0)
+                .clip(lower=0, upper=100)
                 .sum()
                 / 100
             )
 
             active_allocated_fte = (
-                pd.to_numeric(matching.get("live_allocated_percent", 0), errors="coerce")
+                pd.to_numeric(matching["live_allocated_percent"], errors="coerce")
                 .fillna(0)
-                .clip(lower=0)
+                .clip(lower=0, upper=100)
                 .sum()
                 / 100
             )
 
-            progress_values = pd.to_numeric(
-                matching.get("avg_project_progress_percent", 0),
-                errors="coerce",
-            ).fillna(0)
-            progress_values = progress_values[progress_values > 0]
-            avg_progress = float(progress_values.mean()) if len(progress_values) else 0.0
-
-            blockers = int(
-                pd.to_numeric(matching.get("hurdle_count", 0), errors="coerce")
-                .fillna(0)
-                .sum()
-            )
-
-            release_dates = [
-                safe_text(v)
-                for v in matching.get("next_release_date", [])
-                if safe_text(v)
-            ]
-            nearest_release = min(release_dates) if release_dates else ""
+            avg_salary = _bwdb_salary_average(matching)
 
             matched_names = []
-            for _, emp_row in matching.head(4).iterrows():
+            for _, employee_row in matching.head(6).iterrows():
                 matched_names.append(
-                    safe_text(emp_row.get("employee_name"))
-                    or safe_text(emp_row.get("employee_id"))
+                    safe_text(employee_row.get("employee_name"))
+                    or safe_text(employee_row.get("employee_id"))
+                )
+
+            if active_allocation_count == 0:
+                bandwidth_note = (
+                    "project_allocations has no active rows, so every matching delivery employee is treated as 100% available."
+                )
+            else:
+                bandwidth_note = (
+                    f"{active_allocation_count} active Supabase allocation row(s) were used to reduce available bandwidth."
                 )
 
             capacity_notes = (
-                f"Matched {len(matching)} employee(s): "
+                f"Matched {len(matching)} delivery employee(s): "
                 + ", ".join([name for name in matched_names if name])
-                + "."
+                + ". Bandwidth source: Supabase project_allocations only; Excel availability_percent ignored. "
+                + bandwidth_note
             )
+
+        gap = round(max(0, needed - projected_available_fte), 2)
+        immediate_gap = round(max(0, needed - available_now_fte), 2)
+        hiring_needed = round(gap if gap > 0.30 else 0, 2)
 
         rows.append({
             "role": role,
@@ -12198,13 +12713,73 @@ def build_dynamic_role_capacity(required_roles, employees, new_project_timeline_
             "available_now_fte": round(available_now_fte, 2),
             "projected_available_fte": round(projected_available_fte, 2),
             "active_allocated_fte": round(active_allocated_fte, 2),
-            "gap": round(max(0, needed - projected_available_fte), 2),
-            "immediate_gap": round(max(0, needed - available_now_fte), 2),
-            "avg_current_project_progress_percent": round(avg_progress, 2),
-            "hurdle_or_support_request_count": blockers,
-            "nearest_release_date": nearest_release,
+            "gap": gap,
+            "immediate_gap": immediate_gap,
+            "hiring_needed_fte": hiring_needed,
+            "avg_current_project_progress_percent": 0,
+            "hurdle_or_support_request_count": 0,
+            "nearest_release_date": "",
             "capacity_notes": capacity_notes,
             "avg_monthly_salary": round(avg_salary, 2),
         })
 
     return rows
+
+
+def build_live_project_capacity_snapshot(limit=8):
+    """Live capacity snapshot from Supabase project_allocations only."""
+    active = _bwdb_read_active_project_allocations()
+
+    if active is None or active.empty:
+        return []
+
+    rows = []
+
+    grouped = active.groupby("project_id", dropna=False)
+
+    for project_id, group in grouped:
+        if len(rows) >= limit:
+            break
+
+        rows.append({
+            "project_id": safe_text(project_id),
+            "employee_count": int(group["employee_id_norm"].nunique()),
+            "active_allocated_fte": round(
+                pd.to_numeric(group["allocation_percent_num"], errors="coerce").fillna(0).sum() / 100,
+                2,
+            ),
+            "capacity_basis": "Supabase project_allocations active allocation rows only.",
+        })
+
+    return rows
+
+
+try:
+    _bwdb_previous_run_external_client_decision = run_external_client_decision
+except Exception:
+    _bwdb_previous_run_external_client_decision = None
+
+
+def run_external_client_decision(query, data):
+    """Internal agent meeting entry point with corrected bandwidth basis."""
+    if _bwdb_previous_run_external_client_decision is None:
+        return {}
+
+    analysis = _bwdb_previous_run_external_client_decision(query, data)
+
+    if isinstance(analysis, dict):
+        analysis["capacity_basis"] = (
+            "Static Excel data is used only for employees, users, domain, skills, designation, salary, and requirement templates. "
+            "Live bandwidth is calculated only from Supabase project_allocations. "
+            "If project_allocations has no active rows, every matching delivery employee is treated as 100% available."
+        )
+
+        # Force wording consistency after corrected calculation.
+        if safe_number(analysis.get("total_active_allocated_fte"), 0) == 0:
+            if safe_number(analysis.get("total_hiring_needed_fte"), 0) <= 0.30:
+                analysis["hiring_recommendation"] = (
+                    "No hiring needed for the initial quotation. Supabase project_allocations shows no active bandwidth usage, "
+                    "and matching delivery employees can be allocated from the current team."
+                )
+
+    return analysis
