@@ -11448,7 +11448,7 @@ def _final_clean_available_employees(data, project_id):
         lambda r: (
             f"{r.get('employee_id')} - {r.get('employee_name')} "
             f"({r.get('designation')}, available "
-            f"{r.get('available_bandwidth', r.get('availability_percent', ''))}%)"
+            f"{r.get('available_bandwidth', r.get('availability_percent', ''))})"
         ),
         axis=1,
     )
