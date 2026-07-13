@@ -12783,3 +12783,221 @@ def run_external_client_decision(query, data):
                 )
 
     return analysis
+
+
+# =============================================================================
+# FINAL FIX: CONSISTENT HIRING DECISION UI
+# Paste at the VERY BOTTOM of decisiondesk_chunks/05_design_system.py
+# =============================================================================
+
+def _hfix_recommendation_says_no_hiring(analysis):
+    text_value = safe_text((analysis or {}).get("hiring_recommendation")).lower()
+    return any(phrase in text_value for phrase in [
+        "no hiring",
+        "no separate hiring",
+        "hiring is not",
+        "not required",
+        "not necessary",
+        "existing bandwidth can cover",
+        "rebalance bandwidth",
+        "release planning",
+    ])
+
+
+def _hfix_recommendation_says_yes_hiring(analysis):
+    text_value = safe_text((analysis or {}).get("hiring_recommendation")).lower()
+    return any(phrase in text_value for phrase in [
+        "hiring or contract support is recommended",
+        "hiring/contract support is recommended",
+        "hiring/backfill recommended",
+        "hiring recommended",
+        "contract support recommended",
+        "contractor required",
+    ])
+
+
+def _derive_internal_hiring_status(analysis):
+    """Single source of truth for internal hiring Yes/No.
+
+    Rule:
+    If the agent says no hiring is needed, do not show internal hiring necessary,
+    even if a capacity gap number is visible. Show it as a resource gap instead.
+    """
+    analysis = analysis or {}
+
+    hiring_fte = safe_number(analysis.get("total_hiring_needed_fte"), 0)
+    projected_gap = safe_number(analysis.get("total_skill_gap"), 0)
+    immediate_gap = safe_number(analysis.get("immediate_skill_gap"), 0)
+    timeline_risk = safe_text(analysis.get("timeline_risk")) or "Not captured"
+    recommendation = safe_text(analysis.get("hiring_recommendation")).strip()
+
+    if _hfix_recommendation_says_no_hiring(analysis):
+        return (
+            "No",
+            (
+                "No internal hiring is necessary. "
+                f"The {round(projected_gap, 2)} FTE value is a resource/capacity gap to manage through allocation planning, "
+                "not a confirmed hiring action. "
+                f"Hiring FTE: {round(hiring_fte, 2)}, immediate gap: {round(immediate_gap, 2)} FTE, "
+                f"timeline risk: {timeline_risk}. {recommendation}"
+            ).strip()
+        )
+
+    if hiring_fte >= 1.0 or _hfix_recommendation_says_yes_hiring(analysis):
+        return (
+            "Yes",
+            (
+                "Internal hiring or contract support is required. "
+                f"Hiring FTE: {round(hiring_fte, 2)}, projected gap: {round(projected_gap, 2)} FTE, "
+                f"immediate gap: {round(immediate_gap, 2)} FTE, timeline risk: {timeline_risk}. {recommendation}"
+            ).strip()
+        )
+
+    if hiring_fte > 0.25:
+        return (
+            "No",
+            (
+                "No confirmed hiring action now. This can be handled through resource rebalance, partial allocation, "
+                "or optional short-term contractor support only if the timeline cannot move. "
+                f"Hiring FTE: {round(hiring_fte, 2)}, projected gap: {round(projected_gap, 2)} FTE, "
+                f"timeline risk: {timeline_risk}. {recommendation}"
+            ).strip()
+        )
+
+    return (
+        "No",
+        (
+            "No internal hiring is necessary. Existing delivery capacity can cover the initial quotation with allocation planning. "
+            f"Hiring FTE: {round(hiring_fte, 2)}, projected gap: {round(projected_gap, 2)} FTE, "
+            f"timeline risk: {timeline_risk}. {recommendation}"
+        ).strip()
+    )
+
+
+def _enrich_analysis_with_internal_hiring(analysis):
+    enriched = dict(analysis or {})
+    status, basis = _derive_internal_hiring_status(enriched)
+    enriched["hiring_necessary"] = status
+    enriched["hiring_necessity_basis"] = basis
+    return enriched
+
+
+try:
+    _hfix_previous_proposal_row_to_report = proposal_row_to_report
+except Exception:
+    _hfix_previous_proposal_row_to_report = None
+
+
+def proposal_row_to_report(row):
+    """Recompute hiring status so old saved Yes does not override current no-hiring agent conclusion."""
+    report = _hfix_previous_proposal_row_to_report(row) if _hfix_previous_proposal_row_to_report is not None else {}
+
+    if not isinstance(report, dict):
+        report = {}
+
+    analysis = report.setdefault("analysis", {})
+    status, basis = _derive_internal_hiring_status(analysis)
+
+    analysis["hiring_necessary"] = status
+    analysis["hiring_necessity_basis"] = basis
+
+    return report
+
+
+def _update_proposal_internal_hiring_columns(proposal_id, analysis=None):
+    """Save corrected hiring Yes/No into proposal storage."""
+    proposal_id = safe_text(proposal_id).strip()
+
+    if not proposal_id:
+        return False
+
+    try:
+        df = read_proposal_store(create_if_missing=True)
+
+        if df.empty or "proposal_id" not in df.columns:
+            return False
+
+        mask = df["proposal_id"].astype(str) == proposal_id
+
+        if not mask.any():
+            return False
+
+        if analysis is None:
+            report = proposal_row_to_report(df.loc[mask].iloc[0])
+            analysis = report.get("analysis", {})
+
+        status, basis = _derive_internal_hiring_status(analysis)
+
+        df.loc[mask, "hiring_necessary"] = status
+        df.loc[mask, "hiring_necessity_basis"] = basis
+
+        upsert_current_proposal_from_df(df, mask)
+        return True
+
+    except Exception:
+        return False
+
+
+def _hiring_notify_get_saved_decision_from_session(proposal_id, analysis):
+    """Do not allow stale CEO session value to show Hiring Yes when agent says no hiring."""
+    auto_status, auto_basis = _derive_internal_hiring_status(analysis or {})
+
+    if _hfix_recommendation_says_no_hiring(analysis):
+        return "No", auto_basis
+
+    session_key_status = f"ceo_hiring_needed_{proposal_id}"
+    session_key_basis = f"ceo_hiring_basis_{proposal_id}"
+
+    try:
+        selected_status = safe_text(st.session_state.get(session_key_status, auto_status)).strip()
+        selected_basis = safe_text(st.session_state.get(session_key_basis, auto_basis)).strip()
+    except Exception:
+        selected_status = auto_status
+        selected_basis = auto_basis
+
+    if selected_status not in ["Yes", "No"]:
+        selected_status = auto_status
+
+    if not selected_basis:
+        selected_basis = auto_basis
+
+    return selected_status, selected_basis
+
+
+def _hiring_notify_append_to_quote_summary(summary, hiring_status, hiring_basis):
+    """Only append hiring action when final corrected status is Yes."""
+    if safe_text(hiring_status) == "Yes":
+        return (
+            safe_text(summary)
+            + " Internal hiring/contract support is required for this project. "
+            + "HR and leadership should treat this as an active internal hiring action. "
+            + f"Basis: {safe_text(hiring_basis)}"
+        )
+
+    return safe_text(summary)
+
+
+def render_agentic_decision_pack(report):
+    """Clean agent analysis view without misleading 'Internal hiring necessary' wording."""
+    if "_v44_original_render_agentic_decision_pack" in globals() and _v44_original_render_agentic_decision_pack is not None:
+        _v44_original_render_agentic_decision_pack(report)
+
+    analysis = report.get("analysis", {}) if isinstance(report, dict) else {}
+    status, basis = _derive_internal_hiring_status(analysis)
+
+    with st.expander("Internal resource plan - executives only", expanded=False):
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric("Hiring action required", status)
+        c2.metric("Hiring FTE", f"{safe_number(analysis.get('total_hiring_needed_fte'), 0)} FTE")
+        c3.metric("Capacity gap", f"{safe_number(analysis.get('total_skill_gap'), 0)} FTE")
+
+        if status == "Yes":
+            st.warning("Hiring or contract support is required internally.")
+        else:
+            st.success("No confirmed internal hiring action is required. Any visible FTE gap is a capacity/resource planning reference.")
+
+        st.write(basis)
+        st.caption(
+            "Internal only. Client cannot see hiring, salary, margin, cost, employee allocation, or executive notes."
+        )
